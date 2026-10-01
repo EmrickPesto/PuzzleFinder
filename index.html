@@ -1,0 +1,744 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#2f5de0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Puzzle Finder</title>
+<style>
+:root{--bg:#f6f5f1;--card:#fff;--ink:#1c1c1a;--mut:#6b6b66;--line:#e2e0d8;--acc:#2f5de0;--accink:#fff;--ok:#16a34a;--bad:#dc2626}
+@media (prefers-color-scheme:dark){:root{--bg:#141413;--card:#1f1f1d;--ink:#f1f0ea;--mut:#9a9990;--line:#33332f;--acc:#7c9cff;--accink:#0b1020}}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{padding:20px 16px 4px;max-width:720px;margin:0 auto}
+h1{margin:0;font-size:24px}
+.sub{margin:2px 0 0;color:var(--mut)}
+main{max-width:720px;margin:0 auto;padding:12px 16px 48px;display:grid;gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
+h2{margin:0 0 10px;font-size:17px}
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:10px 0}
+.mut{color:var(--mut);font-size:14px}
+.hint{color:var(--mut);font-size:13px;margin:8px 0 0}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:48px;padding:0 16px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--ink);font:inherit;font-weight:600;cursor:pointer;text-align:center}
+.btn.primary{background:var(--acc);color:var(--accink);border-color:transparent}
+.btn.ok{background:var(--ok);color:#fff;border-color:transparent}
+.btn.ghost{background:transparent}
+.btn.small{min-height:40px;font-size:14px;padding:0 12px}
+input[type=number],input[type=text]{width:96px;min-height:44px;font:inherit;padding:0 8px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
+input[type=range]{width:100%;min-height:36px}
+label.chk{display:flex;align-items:center;gap:8px;min-height:36px}
+.mapwrap{margin-top:8px}
+canvas{display:block;width:100%;height:auto;border-radius:10px;touch-action:manipulation}
+#map{border:1px solid var(--line)}
+.empty{padding:28px 12px;text-align:center;color:var(--mut);border:1px dashed var(--line);border-radius:10px}
+#status{margin:10px 0 0;min-height:22px;font-size:14px;color:var(--mut)}
+#status.err{color:var(--bad)}
+.bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-top:6px}
+.bar>i{display:block;height:100%;width:0;background:var(--acc);transition:width .15s}
+.cand{border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:12px}
+.chead{display:flex;gap:10px;align-items:center;margin-bottom:10px}
+.badge{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:50%;color:#fff;font-weight:700;flex:none}
+.tag{display:inline-block;margin-left:6px;padding:1px 8px;border-radius:99px;font-size:12px;font-weight:600;background:var(--line)}
+.thumbs{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.cap{display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;color:var(--mut);margin:4px 0 10px;text-align:center}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+.actions .btn{flex:1 1 auto;min-width:96px}
+details{margin-top:10px;font-size:14px;color:var(--mut)}
+summary{cursor:pointer}
+</style>
+</head>
+<body>
+<header>
+  <h1>🧩 Puzzle Finder</h1>
+  <p class="sub">Photographie une pièce, trouve sa place sur l'image de la boîte.</p>
+</header>
+
+<main>
+  <section class="card" id="s1">
+    <h2>1 · Image du puzzle</h2>
+    <label class="btn" for="refFile">🖼 Choisir l'image de la boîte</label>
+    <input id="refFile" type="file" accept="image/*" hidden>
+    <p class="mut" style="margin:12px 0 0">Dimensions réelles du puzzle fini (indiquées sur la boîte) :</p>
+    <div class="row" style="margin-top:6px">
+      <input id="dimW" type="text" inputmode="decimal" placeholder="Largeur" aria-label="Largeur en cm"> <span>×</span>
+      <input id="dimH" type="text" inputmode="decimal" placeholder="Hauteur" aria-label="Hauteur en cm"> <span>cm</span>
+    </div>
+    <div class="row" style="margin-top:0">
+      <input id="nbPieces" type="text" inputmode="numeric" value="300" aria-label="Nombre de pièces"> <span>pièces</span>
+    </div>
+    <p id="gridInfo" class="mut" style="margin:0"></p>
+    <p class="hint">Sans dimensions, la grille est déduite des proportions de l'image.</p>
+    <details>
+      <summary>Ajuster la grille à la main</summary>
+      <div class="row">
+        <input id="cols" type="number" min="2" max="100" inputmode="numeric" aria-label="Colonnes"> <span>colonnes ×</span>
+        <input id="rows" type="number" min="2" max="100" inputmode="numeric" aria-label="Lignes"> <span>lignes</span>
+      </div>
+    </details>
+    <label class="chk"><input type="checkbox" id="gridChk" checked> Afficher la grille</label>
+    <div class="mapwrap">
+      <div id="mapEmpty" class="empty">Charge l'image de la boîte pour commencer.<br>Elle reste sur ton téléphone, rien n'est envoyé.</div>
+      <canvas id="map" hidden></canvas>
+    </div>
+    <div class="row">
+      <strong id="placedCount"></strong>
+      <button id="undoBtn" class="btn ghost small">↩ Annuler la dernière</button>
+      <button id="resetBtn" class="btn ghost small">Réinitialiser</button>
+    </div>
+    <p class="hint">Touche une case verte de la carte pour la retirer des pièces placées.</p>
+  </section>
+
+  <section class="card" id="s2">
+    <h2>2 · Photo de la pièce</h2>
+    <div class="row">
+      <label class="btn primary" for="pieceCam">📷 Prendre une photo</label>
+      <label class="btn" for="pieceGal">Galerie</label>
+    </div>
+    <input id="pieceCam" type="file" accept="image/*" capture="environment" hidden>
+    <input id="pieceGal" type="file" accept="image/*" hidden>
+    <p class="hint">Pose la pièce, face imprimée vers le haut, sur une feuille unie qui contraste avec elle (papier blanc, nappe unie). Lumière douce, sans ombre, pièce bien cadrée et assez grande dans la photo.</p>
+    <div id="pieceBox" hidden>
+      <div class="mapwrap"><canvas id="pieceCanvas"></canvas></div>
+      <p class="mut" style="margin:10px 0 0">Contour vert faux ? Ajuste le détourage :</p>
+      <input id="mul" type="range" min="0.5" max="2" step="0.05" value="1">
+      <div class="row" style="justify-content:space-between;margin:0"><span class="mut">← plus large</span><span class="mut">plus serré →</span></div>
+      <label class="chk"><input type="checkbox" id="wbChk" checked> Le fond est blanc/gris (corrige les couleurs)</label>
+    </div>
+    <div id="status"></div>
+    <div class="bar" id="barWrap" hidden><i id="bar"></i></div>
+  </section>
+
+  <section class="card" id="s3" hidden>
+    <h2>3 · Emplacements possibles</h2>
+    <div id="resultsHead" class="mut" style="margin-bottom:10px"></div>
+    <div id="results"></div>
+    <button id="moreBtn" class="btn" style="width:100%" hidden>Voir d'autres propositions</button>
+  </section>
+
+  <details class="card">
+    <summary>Comment ça marche ?</summary>
+    <p>La pièce est détourée sur le fond uni, puis sa taille est ramenée à celle d'une case de la grille. Ses couleurs et sa texture sont comparées, sous 18 orientations et 3 échelles, à chaque case de l'image. Les cases les plus proches sont proposées avec l'orientation à donner à la pièce.</p>
+    <p>Sur les zones uniformes (ciel, mer), plusieurs cases se ressemblent : la bonne est alors parmi les premières propositions, pas forcément la première. Les pièces que tu valides sont exclues des recherches suivantes.</p>
+  </details>
+</main>
+
+<script>
+(() => {
+'use strict';
+const $ = id => document.getElementById(id);
+const CW = 24;                       // côté d'une case, en pixels, dans l'image de travail
+const COLORS = ['#ef4444','#f59e0b','#3b82f6','#a855f7','#14b8a6'];
+
+const store = {
+  get(k, d){ try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch(e){ return d; } },
+  set(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} }
+};
+
+const S = {
+  ref:null, work:null, cols:20, rows:15, placed:[],
+  photo:null, mask:null, piece:null, mul:1, wb:true,
+  ranked:[], median:1, rejected:new Set(), shown:5, focus:-1, runId:0
+};
+
+/* ---------- utilitaires image ---------- */
+const dim = s => [s.naturalWidth || s.width, s.naturalHeight || s.height];
+
+function resize(src, w, h){
+  let cur = src;
+  for(;;){
+    const [cw, ch] = dim(cur);
+    if(cw / 2 >= w && ch / 2 >= h){
+      const c = document.createElement('canvas');
+      c.width = Math.floor(cw / 2); c.height = Math.floor(ch / 2);
+      const x = c.getContext('2d'); x.imageSmoothingQuality = 'high';
+      x.drawImage(cur, 0, 0, c.width, c.height);
+      cur = c;
+    } else break;
+  }
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d'); x.imageSmoothingQuality = 'high';
+  x.drawImage(cur, 0, 0, w, h);
+  return c;
+}
+function fit(src, max){
+  const [w, h] = dim(src);
+  const s = Math.min(1, max / Math.max(w, h));
+  return resize(src, Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s)));
+}
+function loadImg(file){
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file);
+    const im = new Image();
+    im.onload = () => { URL.revokeObjectURL(url); res(im); };
+    im.onerror = () => { URL.revokeObjectURL(url); rej(new Error('image illisible')); };
+    im.src = url;
+  });
+}
+function boxBlur(a, w, h, r){
+  if(r < 1) return a;
+  const t = new Float32Array(w * h), o = new Float32Array(w * h), k = 2 * r + 1;
+  for(let y = 0; y < h; y++){
+    const row = y * w; let sum = 0;
+    for(let x = -r; x <= r; x++) sum += a[row + Math.min(w - 1, Math.max(0, x))];
+    for(let x = 0; x < w; x++){
+      t[row + x] = sum / k;
+      sum += a[row + Math.min(w - 1, x + r + 1)] - a[row + Math.max(0, x - r)];
+    }
+  }
+  for(let x = 0; x < w; x++){
+    let sum = 0;
+    for(let y = -r; y <= r; y++) sum += t[Math.min(h - 1, Math.max(0, y)) * w + x];
+    for(let y = 0; y < h; y++){
+      o[y * w + x] = sum / k;
+      sum += t[Math.min(h - 1, y + r + 1) * w + x] - t[Math.max(0, y - r) * w + x];
+    }
+  }
+  return o;
+}
+function yuv(d, n){
+  const L = new Float32Array(n), U = new Float32Array(n), V = new Float32Array(n);
+  for(let i = 0, j = 0; i < n; i++, j += 4){
+    const r = d[j], g = d[j + 1], b = d[j + 2], y = .299 * r + .587 * g + .114 * b;
+    L[i] = y; U[i] = b - y; V[i] = r - y;
+  }
+  return {L, U, V};
+}
+
+/* ---------- morphologie ---------- */
+function largestCC(mask, w, h){
+  const n = w * h, lab = new Int32Array(n), stack = new Int32Array(n);
+  let best = 0, bestId = 0, id = 0;
+  for(let i = 0; i < n; i++){
+    if(mask[i] && !lab[i]){
+      id++; let sp = 0, cnt = 0; stack[sp++] = i; lab[i] = id;
+      while(sp){
+        const p = stack[--sp]; cnt++;
+        const x = p % w, y = (p / w) | 0;
+        if(x > 0){ const q = p - 1; if(mask[q] && !lab[q]){ lab[q] = id; stack[sp++] = q; } }
+        if(x < w - 1){ const q = p + 1; if(mask[q] && !lab[q]){ lab[q] = id; stack[sp++] = q; } }
+        if(y > 0){ const q = p - w; if(mask[q] && !lab[q]){ lab[q] = id; stack[sp++] = q; } }
+        if(y < h - 1){ const q = p + w; if(mask[q] && !lab[q]){ lab[q] = id; stack[sp++] = q; } }
+      }
+      if(cnt > best){ best = cnt; bestId = id; }
+    }
+  }
+  const out = new Uint8Array(n);
+  if(bestId) for(let i = 0; i < n; i++) if(lab[i] === bestId) out[i] = 1;
+  return out;
+}
+function fillHoles(mask, w, h){
+  const n = w * h, bg = new Uint8Array(n), stack = new Int32Array(n);
+  let sp = 0;
+  const push = p => { if(!mask[p] && !bg[p]){ bg[p] = 1; stack[sp++] = p; } };
+  for(let x = 0; x < w; x++){ push(x); push((h - 1) * w + x); }
+  for(let y = 0; y < h; y++){ push(y * w); push(y * w + w - 1); }
+  while(sp){
+    const p = stack[--sp], x = p % w, y = (p / w) | 0;
+    if(x > 0) push(p - 1);
+    if(x < w - 1) push(p + 1);
+    if(y > 0) push(p - w);
+    if(y < h - 1) push(p + w);
+  }
+  const out = new Uint8Array(n);
+  for(let i = 0; i < n; i++) out[i] = bg[i] ? 0 : 1;
+  return out;
+}
+function erode(mask, w, h, r){
+  let cur = mask;
+  for(let it = 0; it < r; it++){
+    const nx = new Uint8Array(w * h);
+    for(let y = 1; y < h - 1; y++){
+      for(let x = 1; x < w - 1; x++){
+        const i = y * w + x;
+        nx[i] = (cur[i] && cur[i - 1] && cur[i + 1] && cur[i - w] && cur[i + w]) ? 1 : 0;
+      }
+    }
+    cur = nx;
+  }
+  return cur;
+}
+
+/* ---------- calcul de la grille ---------- */
+const num = v => parseFloat(String(v).replace(',', '.'));
+function dims(){
+  const W = num($('dimW').value), H = num($('dimH').value);
+  return (W > 0 && H > 0) ? {W, H} : null;
+}
+// meilleure grille (colonnes × lignes) : bon nombre de pièces ET pièces presque carrées
+function computeGrid(W, H, N){
+  let best = null;
+  for(let c = 2; c <= 100; c++){
+    const r = Math.max(2, Math.round(c * H / W));
+    if(r > 100) continue;
+    const asp = Math.abs((W / c) / (H / r) - 1), err = Math.abs(c * r - N) / N;
+    const sc = err + 2 * asp;
+    if(!best || sc < best.sc) best = {c, r, sc};
+  }
+  return best;
+}
+function calcGrid(refc){
+  const N = parseInt($('nbPieces').value) || 300;
+  let d = dims();
+  if(!d){ if(!refc) return null; d = {W:refc.width, H:refc.height}; }
+  return computeGrid(d.W, d.H, N);
+}
+function showInfo(){
+  const N = parseInt($('nbPieces').value) || 0, d = dims();
+  let t = 'Grille : ' + S.cols + ' colonnes × ' + S.rows + ' lignes = ' + (S.cols * S.rows) + ' pièces';
+  if(d) t += ' · pièce ≈ ' + (d.W / S.cols).toFixed(1) + ' × ' + (d.H / S.rows).toFixed(1) + ' cm';
+  if(N && N !== S.cols * S.rows) t += ' (annoncé : ' + N + ')';
+  if(d && S.ref && Math.abs((d.W / d.H) / (S.ref.width / S.ref.height) - 1) > .06)
+    t += '. ⚠ L\'image n\'a pas les mêmes proportions que le puzzle (image rognée ?).';
+  $('gridInfo').textContent = t;
+}
+function setGrid(c, r){
+  if(c === S.cols && r === S.rows){ updateCounts(); return true; }
+  if(S.placed.length && !confirm('Changer la grille réinitialise les pièces déjà placées. Continuer ?')) return false;
+  S.placed = []; savePlaced();
+  S.cols = c; S.rows = r; $('cols').value = c; $('rows').value = r;
+  store.set('pf_cols', c); store.set('pf_rows', r);
+  buildWork(); clearResults(); redrawMap(); updateCounts();
+  if(S.photo) process();
+  return true;
+}
+function applyDims(){
+  store.set('pf_dims', {w:$('dimW').value, h:$('dimH').value, n:$('nbPieces').value});
+  const g = calcGrid(S.ref);
+  if(g) setGrid(g.c, g.r); else updateCounts();
+}
+
+/* ---------- image de référence ---------- */
+function buildWork(){
+  if(!S.ref){ S.work = null; return; }
+  const cellW = S.ref.width / S.cols, cellH = S.ref.height / S.rows;
+  const ws = CW / Math.sqrt(cellW * cellH);
+  const W = Math.max(8, Math.round(S.ref.width * ws)), H = Math.max(8, Math.round(S.ref.height * ws));
+  const c = resize(S.ref, W, H);
+  const d = c.getContext('2d').getImageData(0, 0, W, H).data;
+  const {L, U, V} = yuv(d, W * H);
+  S.work = {W, H, L:boxBlur(L, W, H, 1), U:boxBlur(U, W, H, 1), V:boxBlur(V, W, H, 1)};
+}
+function setRef(c, fromUser){
+  S.ref = c;
+  if(fromUser){
+    const g = calcGrid(c) || {c:20, r:15};
+    S.cols = g.c; S.rows = g.r;
+    S.placed = [];
+    store.set('pf_placed', S.placed);
+    store.set('pf_cols', S.cols); store.set('pf_rows', S.rows);
+    try { store.set('pf_ref', c.toDataURL('image/jpeg', .85)); } catch(e){}
+  }
+  $('cols').value = S.cols; $('rows').value = S.rows;
+  buildWork(); clearResults(); redrawMap(); updateCounts();
+}
+
+/* ---------- carte ---------- */
+function visible(){ return S.ranked.filter(r => !S.rejected.has(r.i)); }
+
+function redrawMap(){
+  const cv = $('map');
+  if(!S.ref){ cv.hidden = true; $('mapEmpty').hidden = false; return; }
+  cv.hidden = false; $('mapEmpty').hidden = true;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = Math.max(200, cv.parentElement.clientWidth || 300);
+  const w = Math.min(S.ref.width, Math.round(cssW * dpr));
+  const h = Math.round(w * S.ref.height / S.ref.width);
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d');
+  ctx.drawImage(S.ref, 0, 0, w, h);
+  const sx = w / S.cols, sy = h / S.rows;
+  if($('gridChk').checked){
+    ctx.strokeStyle = 'rgba(255,255,255,.45)'; ctx.lineWidth = 1; ctx.beginPath();
+    for(let c = 1; c < S.cols; c++){ ctx.moveTo(c * sx, 0); ctx.lineTo(c * sx, h); }
+    for(let r = 1; r < S.rows; r++){ ctx.moveTo(0, r * sy); ctx.lineTo(w, r * sy); }
+    ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(22,163,74,.5)';
+  ctx.font = 'bold ' + Math.max(8, Math.min(sx, sy) * .6) + 'px system-ui,sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for(const key of S.placed){
+    const [c, r] = key.split(',').map(Number);
+    ctx.fillStyle = 'rgba(22,163,74,.5)';
+    ctx.fillRect(c * sx, r * sy, sx, sy);
+    ctx.fillStyle = '#fff';
+    ctx.fillText('✓', (c + .5) * sx, (r + .5) * sy);
+  }
+  const list = visible().slice(0, S.shown);
+  const fs = Math.max(10, Math.min(sx, sy) * .55);
+  list.forEach((cand, k) => {
+    const color = COLORS[k % COLORS.length], focus = (k === S.focus);
+    const x = cand.col * sx, y = cand.row * sy;
+    if(focus){ ctx.fillStyle = color + '55'; ctx.fillRect(x, y, sx, sy); }
+    ctx.lineWidth = focus ? 4 : 2.5; ctx.strokeStyle = '#000'; ctx.strokeRect(x, y, sx, sy);
+    ctx.lineWidth = focus ? 2.5 : 1.5; ctx.strokeStyle = color; ctx.strokeRect(x, y, sx, sy);
+    ctx.fillStyle = color;
+    const bw = fs * 1.1;
+    ctx.fillRect(x, y, bw, bw);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold ' + fs * .8 + 'px system-ui,sans-serif';
+    ctx.fillText(String(k + 1), x + bw / 2, y + bw / 2 + 1);
+  });
+}
+function updateCounts(){
+  showInfo();
+  $('placedCount').textContent = S.placed.length + ' / ' + (S.cols * S.rows) + ' pièces placées';
+  $('undoBtn').disabled = !S.placed.length;
+}
+function clearResults(){
+  S.runId++; S.ranked = []; S.focus = -1; S.rejected = new Set(); S.shown = 5;
+  $('s3').hidden = true; $('results').innerHTML = '';
+}
+function savePlaced(){ store.set('pf_placed', S.placed); }
+
+/* ---------- détourage de la pièce ---------- */
+function setStatus(t, err){ const s = $('status'); s.textContent = t || ''; s.className = err ? 'err' : ''; }
+function setProgress(p){
+  const w = $('barWrap'); w.hidden = (p === null);
+  if(p !== null) $('bar').style.width = Math.round(p * 100) + '%';
+}
+
+function analysePhoto(){
+  const P = S.photo, w = P.width, h = P.height, n = w * h;
+  const src = P.getContext('2d').getImageData(0, 0, w, h).data;
+  // couleur du fond = médiane du pourtour
+  const band = Math.max(4, Math.round(Math.min(w, h) * .03));
+  const rs = [], gs = [], bs = [];
+  for(let y = 0; y < h; y += 2) for(let x = 0; x < w; x += 2){
+    if(x < band || y < band || x >= w - band || y >= h - band){
+      const j = (y * w + x) * 4; rs.push(src[j]); gs.push(src[j + 1]); bs.push(src[j + 2]);
+    }
+  }
+  const med = a => { const t = Uint8Array.from(a).sort(); return t[t.length >> 1]; };
+  const bg = [med(rs), med(gs), med(bs)];
+  // distance au fond + seuil d'Otsu
+  const dist = new Float32Array(n), hist = new Float64Array(256);
+  for(let i = 0, j = 0; i < n; i++, j += 4){
+    const dr = src[j] - bg[0], dg = src[j + 1] - bg[1], db = src[j + 2] - bg[2];
+    const v = Math.sqrt(dr * dr + dg * dg + db * db);
+    dist[i] = v; hist[Math.min(255, (v * 256 / 442) | 0)]++;
+  }
+  let sum = 0; for(let t = 0; t < 256; t++) sum += t * hist[t];
+  let wB = 0, sumB = 0, maxB = -1, th = 0;
+  for(let t = 0; t < 256; t++){
+    wB += hist[t]; if(!wB) continue;
+    const wF = n - wB; if(!wF) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB, mF = (sum - sumB) / wF, bt = wB * wF * (mB - mF) * (mB - mF);
+    if(bt > maxB){ maxB = bt; th = t; }
+  }
+  const otsuD = (th + 1) * 442 / 256;
+  const thr = Math.max(22, Math.min(110, otsuD)) * S.mul;
+  let mask = new Uint8Array(n);
+  for(let i = 0; i < n; i++) mask[i] = dist[i] > thr ? 1 : 0;
+  mask = fillHoles(largestCC(mask, w, h), w, h);
+  S.mask = mask;
+
+  let A = 0, sx = 0, sy = 0, x0 = w, x1 = 0, y0 = h, y1 = 0;
+  for(let y = 0; y < h; y++) for(let x = 0; x < w; x++){
+    if(mask[y * w + x]){
+      A++; sx += x; sy += y;
+      if(x < x0) x0 = x; if(x > x1) x1 = x; if(y < y0) y0 = y; if(y > y1) y1 = y;
+    }
+  }
+  S.piece = null;
+  if(A < n * .008){ setStatus('Pièce non détectée : fond non uni, ou pièce trop petite. Essaie de resserrer ou d\'élargir le détourage.', true); return false; }
+  if(A > n * .7){ setStatus('Le détourage couvre presque toute la photo. Utilise un fond uni et resserre le détourage.', true); return false; }
+  const cx = sx / A, cy = sy / A;
+
+  // couleurs corrigées par le fond (balance des blancs)
+  const corr = new Uint8ClampedArray(src);
+  if(S.wb){
+    const g = bg.map(v => Math.min(2, Math.max(.5, 235 / Math.max(1, v))));
+    for(let j = 0; j < corr.length; j += 4){ corr[j] *= g[0]; corr[j + 1] *= g[1]; corr[j + 2] *= g[2]; }
+  }
+  const k = CW / Math.sqrt(A);
+  let {L, U, V} = yuv(corr, n);
+  const rb = Math.max(1, Math.round(.5 / k));
+  L = boxBlur(L, w, h, rb); U = boxBlur(U, w, h, rb); V = boxBlur(V, w, h, rb);
+
+  // zone intérieure de la pièce (on s'éloigne des bords : ombres, tranche)
+  let r = Math.max(2, Math.round(.14 * Math.sqrt(A)));
+  let er = erode(mask, w, h, r), cnt = 0;
+  for(let i = 0; i < n; i++) cnt += er[i];
+  if(cnt < 60){ er = erode(mask, w, h, Math.max(1, r >> 1)); cnt = 0; for(let i = 0; i < n; i++) cnt += er[i]; }
+  if(cnt < 20){ setStatus('Pièce trop petite ou mal détourée.', true); return false; }
+  const st = Math.max(1, Math.round(Math.sqrt(cnt / 220)));
+  const qx = [], qy = [], ql = [], qu = [], qv = [];
+  for(let y = 0; y < h; y += st) for(let x = 0; x < w; x += st){
+    const i = y * w + x;
+    if(er[i]){ qx.push((x - cx) * k); qy.push((y - cy) * k); ql.push(L[i]); qu.push(U[i]); qv.push(V[i]); }
+  }
+  // découpe de la pièce (pour les vignettes)
+  const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+  const cut = document.createElement('canvas'); cut.width = bw; cut.height = bh;
+  const cctx = cut.getContext('2d'), cid = cctx.createImageData(bw, bh);
+  for(let y = 0; y < bh; y++) for(let x = 0; x < bw; x++){
+    const i = (y + y0) * w + (x + x0), o = (y * bw + x) * 4;
+    cid.data[o] = corr[i * 4]; cid.data[o + 1] = corr[i * 4 + 1]; cid.data[o + 2] = corr[i * 4 + 2];
+    cid.data[o + 3] = mask[i] ? 255 : 0;
+  }
+  cctx.putImageData(cid, 0, 0);
+
+  S.piece = {A, cx, cy, bx:x0, by:y0, N:qx.length,
+    QX:Float32Array.from(qx), QY:Float32Array.from(qy), QL:Float32Array.from(ql),
+    QU:Float32Array.from(qu), QV:Float32Array.from(qv), cutout:cut};
+  return true;
+}
+
+function drawPiece(){
+  const cv = $('pieceCanvas'), P = S.photo, w = P.width, h = P.height;
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d'); ctx.drawImage(P, 0, 0);
+  const m = S.mask; if(!m) return;
+  const id = ctx.getImageData(0, 0, w, h), d = id.data;
+  const paint = i => { if(i >= 0 && i < w * h){ d[i * 4] = 57; d[i * 4 + 1] = 255; d[i * 4 + 2] = 20; } };
+  for(let y = 1; y < h - 1; y++) for(let x = 1; x < w - 1; x++){
+    const i = y * w + x;
+    if(m[i] && (!m[i - 1] || !m[i + 1] || !m[i - w] || !m[i + w])){ paint(i); paint(i + 1); paint(i + w); }
+  }
+  ctx.putImageData(id, 0, 0);
+}
+
+/* ---------- recherche ---------- */
+async function runSearch(){
+  const id = ++S.runId;
+  const wk = S.work, p = S.piece;
+  if(!wk || !p) return;
+  const {W, H, L, U, V} = wk, N = p.N, QX = p.QX, QY = p.QY, QL = p.QL, QU = p.QU, QV = p.QV;
+  const minN = N * .7;
+
+  function score(cx, cy, ca, sa, m){
+    let n = 0, sy = 0, syy = 0, sc = 0;
+    for(let i = 0; i < N; i++){
+      const x = QX[i] * m, y = QY[i] * m;
+      const rx = (cx + x * ca - y * sa + .5) | 0, ry = (cy + x * sa + y * ca + .5) | 0;
+      if(rx < 0 || ry < 0 || rx >= W || ry >= H) continue;
+      const j = ry * W + rx;
+      const dy = QL[i] - L[j];
+      sy += dy; syy += dy * dy;
+      sc += Math.abs(QU[i] - U[j]) + Math.abs(QV[i] - V[j]);
+      n++;
+    }
+    if(n < minN) return Infinity;
+    const mean = sy / n, vr = Math.max(0, syy / n - mean * mean);
+    return sc / n + .6 * Math.sqrt(vr) + .3 * Math.abs(mean);
+  }
+
+  const cols = S.cols, rows = S.rows, nc = cols * rows, cw = W / cols, ch = H / rows;
+  const placed = new Set(S.placed);
+  const best = new Float32Array(nc).fill(Infinity);
+  const bx = new Float32Array(nc), by = new Float32Array(nc), ba = new Float32Array(nc), bm = new Float32Array(nc);
+  const NR = 18, scales = [.9, 1, 1.1], cs = [], sn = [];
+  for(let r = 0; r < NR; r++){ const a = r * 2 * Math.PI / NR; cs.push(Math.cos(a)); sn.push(Math.sin(a)); }
+  const step = CW / 4;
+  let last = performance.now();
+
+  for(let y = step / 2; y < H; y += step){
+    const row = Math.min(rows - 1, Math.floor(y / ch));
+    for(let x = step / 2; x < W; x += step){
+      const col = Math.min(cols - 1, Math.floor(x / cw)), ci = row * cols + col;
+      if(placed.has(col + ',' + row)) continue;
+      for(let si = 0; si < 3; si++) for(let r = 0; r < NR; r++){
+        const s = score(x, y, cs[r], sn[r], scales[si]);
+        if(s < best[ci]){ best[ci] = s; bx[ci] = x; by[ci] = y; ba[ci] = r * 2 * Math.PI / NR; bm[ci] = scales[si]; }
+      }
+    }
+    if(performance.now() - last > 40){
+      setProgress(y / H); setStatus('Recherche… ' + Math.round(100 * y / H) + ' %');
+      await new Promise(r => setTimeout(r, 0)); last = performance.now();
+      if(id !== S.runId) return;
+    }
+  }
+
+  // affinage des meilleures cases
+  let order = [];
+  for(let i = 0; i < nc; i++) if(isFinite(best[i])) order.push(i);
+  order.sort((a, b) => best[a] - best[b]);
+  const K = Math.min(15, order.length);
+  for(let t = 0; t < K; t++){
+    const i = order[t];
+    let bs = best[i], x0 = bx[i], y0 = by[i], a0 = ba[i], m0 = bm[i];
+    const nx = x0, ny = y0, na = a0, nm = m0;
+    for(let da = -10; da <= 10; da += 5)
+      for(let dm = -.05; dm <= .051; dm += .05)
+        for(let dx = -3; dx <= 3; dx += 1.5)
+          for(let dy = -3; dy <= 3; dy += 1.5){
+            const a = na + da * Math.PI / 180;
+            const s = score(nx + dx, ny + dy, Math.cos(a), Math.sin(a), nm + dm);
+            if(s < bs){ bs = s; x0 = nx + dx; y0 = ny + dy; a0 = a; m0 = nm + dm; }
+          }
+    best[i] = bs; bx[i] = x0; by[i] = y0; ba[i] = a0; bm[i] = m0;
+  }
+  order.sort((a, b) => best[a] - best[b]);
+  if(id !== S.runId) return;
+
+  S.median = order.length ? best[order[order.length >> 1]] : 1;
+  S.ranked = order.map(i => ({i, col:i % cols, row:(i / cols) | 0, score:best[i], ang:ba[i], m:bm[i]}));
+  S.rejected = new Set(); S.shown = 5; S.focus = -1;
+  setProgress(null); setStatus('');
+  renderResults();
+}
+
+/* ---------- résultats ---------- */
+function drawRefThumb(cv, col, row){
+  const T = cv.width, ctx = cv.getContext('2d'), R = S.ref;
+  const cw = R.width / S.cols, ch = R.height / S.rows, win = 3 * Math.sqrt(cw * ch);
+  const cx = (col + .5) * cw, cy = (row + .5) * ch, sx = cx - win / 2, sy = cy - win / 2, k = T / win;
+  ctx.fillStyle = '#888'; ctx.fillRect(0, 0, T, T);
+  const x0 = Math.max(0, sx), y0 = Math.max(0, sy), x1 = Math.min(R.width, sx + win), y1 = Math.min(R.height, sy + win);
+  ctx.drawImage(R, x0, y0, x1 - x0, y1 - y0, (x0 - sx) * k, (y0 - sy) * k, (x1 - x0) * k, (y1 - y0) * k);
+  const bx = (cx - cw / 2 - sx) * k, by = (cy - ch / 2 - sy) * k;
+  ctx.lineWidth = 4; ctx.strokeStyle = '#000'; ctx.strokeRect(bx, by, cw * k, ch * k);
+  ctx.lineWidth = 2; ctx.strokeStyle = '#fff'; ctx.strokeRect(bx, by, cw * k, ch * k);
+}
+function drawPieceThumb(cv, ang, m){
+  const T = cv.width, ctx = cv.getContext('2d'), p = S.piece;
+  ctx.fillStyle = '#d9d8d2'; ctx.fillRect(0, 0, T, T);
+  ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.strokeRect(T / 3, T / 3, T / 3, T / 3);
+  ctx.save();
+  ctx.translate(T / 2, T / 2); ctx.rotate(ang);
+  const sc = (T / 3) / Math.sqrt(p.A) * m; ctx.scale(sc, sc);
+  ctx.drawImage(p.cutout, -(p.cx - p.bx), -(p.cy - p.by));
+  ctx.restore();
+}
+function rotText(ang){
+  let d = Math.round((((ang * 180 / Math.PI) % 360) + 360) % 360 / 5) * 5 % 360;
+  if(d === 0) return 'Orientation de la photo correcte';
+  if(d > 180) return 'Tourne la pièce de ' + (360 - d) + '° dans le sens inverse des aiguilles d\'une montre';
+  return 'Tourne la pièce de ' + d + '° dans le sens des aiguilles d\'une montre';
+}
+
+function renderResults(){
+  const box = $('results'); box.innerHTML = '';
+  $('s3').hidden = false;
+  const list = visible();
+  if(!list.length){
+    $('resultsHead').textContent = '';
+    box.textContent = 'Plus aucune proposition. Reprends une photo de la pièce (fond uni, bien à plat).';
+    $('moreBtn').hidden = true; redrawMap(); return;
+  }
+  const ratio = list[0].score / (S.median || 1);
+  const conf = ratio < .55 ? 'Très probable' : ratio < .8 ? 'Probable' : 'Incertain (zone peu distinctive)';
+  $('resultsHead').textContent = 'Meilleure proposition : ' + conf.toLowerCase() + '.';
+
+  list.slice(0, S.shown).forEach((r, k) => {
+    const card = document.createElement('div'); card.className = 'cand';
+    card.innerHTML =
+      '<div class="chead"><span class="badge" style="background:' + COLORS[k % COLORS.length] + '">' + (k + 1) + '</span>' +
+      '<div><b>Ligne ' + (r.row + 1) + ' · Colonne ' + (r.col + 1) + '</b>' + (k === 0 ? '<span class="tag">' + conf + '</span>' : '') +
+      '<div class="mut">' + rotText(r.ang) + '</div></div></div>' +
+      '<div class="thumbs"><canvas width="240" height="240" class="tr"></canvas><canvas width="240" height="240" class="tp"></canvas></div>' +
+      '<div class="cap"><span>Zone du puzzle</span><span>Ta pièce, orientée</span></div>' +
+      '<div class="actions"><button class="btn ok">✓ C\'est bon</button><button class="btn ghost no">✗ Pas ça</button><button class="btn ghost loc">📍 Carte</button></div>';
+    drawRefThumb(card.querySelector('.tr'), r.col, r.row);
+    drawPieceThumb(card.querySelector('.tp'), r.ang, r.m);
+    card.querySelector('.ok').onclick = () => validate(r);
+    card.querySelector('.no').onclick = () => { S.rejected.add(r.i); S.focus = -1; renderResults(); };
+    card.querySelector('.loc').onclick = () => { S.focus = k; redrawMap(); $('map').scrollIntoView({behavior:'smooth', block:'center'}); };
+    box.appendChild(card);
+  });
+  $('moreBtn').hidden = list.length <= S.shown;
+  redrawMap();
+}
+
+function validate(r){
+  S.placed.push(r.col + ',' + r.row); savePlaced();
+  S.piece = null; S.mask = null; S.photo = null;
+  clearResults();
+  $('pieceBox').hidden = true;
+  setStatus('✓ Pièce enregistrée en ligne ' + (r.row + 1) + ', colonne ' + (r.col + 1) + '. Photographie la suivante.');
+  redrawMap(); updateCounts();
+  $('s2').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+/* ---------- pipeline photo ---------- */
+let busy = false, again = false;
+async function process(){
+  if(!S.photo) return;
+  if(!S.work){ setStatus('Charge d\'abord l\'image du puzzle (étape 1).', true); return; }
+  if(busy){ again = true; return; }
+  busy = true;
+  try {
+    do {
+      again = false;
+      clearResults();
+      setStatus('Détourage de la pièce…');
+      await new Promise(r => setTimeout(r, 0));
+      const ok = analysePhoto();
+      drawPiece();
+      if(!ok){ setProgress(null); break; }
+      setStatus('Recherche…'); setProgress(0);
+      await runSearch();
+    } while(again);
+  } catch(e){
+    setStatus('Erreur : ' + e.message, true); setProgress(null);
+  }
+  busy = false;
+}
+async function onPieceFile(file){
+  if(!file) return;
+  try {
+    const im = await loadImg(file);
+    S.photo = fit(im, 600);
+    $('pieceBox').hidden = false;
+    await process();
+  } catch(e){ setStatus('Impossible de lire cette photo.', true); }
+}
+
+/* ---------- événements ---------- */
+$('refFile').addEventListener('change', async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if(!f) return;
+  try { setRef(fit(await loadImg(f), 1400), true); }
+  catch(err){ alert('Impossible de lire cette image.'); }
+});
+['pieceCam', 'pieceGal'].forEach(id => $(id).addEventListener('change', e => {
+  const f = e.target.files[0]; e.target.value = ''; onPieceFile(f);
+}));
+['cols', 'rows'].forEach(id => $(id).addEventListener('change', () => {
+  const c = Math.min(100, Math.max(2, parseInt($('cols').value) || S.cols));
+  const r = Math.min(100, Math.max(2, parseInt($('rows').value) || S.rows));
+  if(!setGrid(c, r)){ $('cols').value = S.cols; $('rows').value = S.rows; }
+}));
+['dimW', 'dimH', 'nbPieces'].forEach(id => $(id).addEventListener('change', applyDims));
+$('gridChk').addEventListener('change', redrawMap);
+let deb;
+$('mul').addEventListener('input', e => { S.mul = +e.target.value; clearTimeout(deb); deb = setTimeout(process, 300); });
+$('wbChk').addEventListener('change', e => { S.wb = e.target.checked; process(); });
+$('moreBtn').addEventListener('click', () => { S.shown += 5; renderResults(); });
+$('undoBtn').addEventListener('click', () => { S.placed.pop(); savePlaced(); redrawMap(); updateCounts(); });
+$('resetBtn').addEventListener('click', () => {
+  if(S.placed.length && confirm('Effacer toutes les pièces placées ?')){ S.placed = []; savePlaced(); redrawMap(); updateCounts(); }
+});
+$('map').addEventListener('click', e => {
+  if(!S.ref) return;
+  const r = $('map').getBoundingClientRect();
+  const col = Math.floor((e.clientX - r.left) / r.width * S.cols), row = Math.floor((e.clientY - r.top) / r.height * S.rows);
+  const key = col + ',' + row, idx = S.placed.indexOf(key);
+  if(idx >= 0 && confirm('Retirer cette pièce (ligne ' + (row + 1) + ', colonne ' + (col + 1) + ') des pièces placées ?')){
+    S.placed.splice(idx, 1); savePlaced(); redrawMap(); updateCounts();
+  }
+});
+let rdeb;
+window.addEventListener('resize', () => { clearTimeout(rdeb); rdeb = setTimeout(redrawMap, 150); });
+
+/* ---------- démarrage ---------- */
+S.cols = store.get('pf_cols', 20); S.rows = store.get('pf_rows', 15); S.placed = store.get('pf_placed', []);
+$('cols').value = S.cols; $('rows').value = S.rows;
+{ const d = store.get('pf_dims', null); if(d){ $('dimW').value = d.w || ''; $('dimH').value = d.h || ''; $('nbPieces').value = d.n || 300; } }
+updateCounts();
+const saved = store.get('pf_ref', null);
+if(saved){
+  const im = new Image();
+  im.onload = () => setRef(fit(im, 1400), false);
+  im.src = saved;
+} else redrawMap();
+
+if(window.__PF_TEST) window.__pf = {S, setRef, analysePhoto, runSearch, buildWork};
+})();
+</script>
+</body>
+</html>
