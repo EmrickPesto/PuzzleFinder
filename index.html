@@ -28,7 +28,8 @@ h2{margin:0 0 10px;font-size:17px}
 .btn.ok{background:var(--ok);color:#fff;border-color:transparent}
 .btn.ghost{background:transparent}
 .btn.small{min-height:40px;font-size:14px;padding:0 12px}
-input[type=number],input[type=text]{width:96px;min-height:44px;font:inherit;padding:0 8px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
+input[type=number],input[type=text],select{width:96px;min-height:44px;font:inherit;padding:0 8px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
+select{width:auto}
 input[type=range]{width:100%;min-height:36px}
 label.chk{display:flex;align-items:center;gap:8px;min-height:36px}
 .mapwrap{margin-top:8px}
@@ -107,9 +108,20 @@ summary{cursor:pointer}
       <input id="mul" type="range" min="0.5" max="2" step="0.05" value="1">
       <div class="row" style="justify-content:space-between;margin:0"><span class="mut">← plus large</span><span class="mut">plus serré →</span></div>
       <label class="chk"><input type="checkbox" id="wbChk" checked> Le fond est blanc/gris (corrige les couleurs)</label>
+      <div class="row">
+        <label for="ptype">Type de pièce :</label>
+        <select id="ptype">
+          <option value="auto">Automatique</option>
+          <option value="interior">Intérieure (aucun côté droit)</option>
+          <option value="edge">Bord (1 côté droit)</option>
+          <option value="corner">Coin (2 côtés droits)</option>
+        </select>
+      </div>
+      <p id="typeInfo" class="mut" style="margin:0"></p>
     </div>
     <div id="status"></div>
     <div class="bar" id="barWrap" hidden><i id="bar"></i></div>
+    <p id="calInfo" class="hint"></p>
   </section>
 
   <section class="card" id="s3" hidden>
@@ -121,8 +133,9 @@ summary{cursor:pointer}
 
   <details class="card">
     <summary>Comment ça marche ?</summary>
-    <p>La pièce est détourée sur le fond uni, puis sa taille est ramenée à celle d'une case de la grille. Ses couleurs et sa texture sont comparées, sous 18 orientations et 3 échelles, à chaque case de l'image. Les cases les plus proches sont proposées avec l'orientation à donner à la pièce.</p>
-    <p>Sur les zones uniformes (ciel, mer), plusieurs cases se ressemblent : la bonne est alors parmi les premières propositions, pas forcément la première. Les pièces que tu valides sont exclues des recherches suivantes.</p>
+    <p>La pièce est détourée sur le fond uni, puis sa taille est ramenée à celle d'une case de la grille. Elle est comparée à chaque case sous toutes les orientations, d'abord en basse résolution sur tout le puzzle, puis en haute résolution sur les meilleures candidates. La comparaison porte surtout sur la forme des motifs (courbes, ombres, contours), pas sur la couleur moyenne.</p>
+    <p>Les côtés droits de la pièce sont détectés : une pièce de bord n'est cherchée que sur le pourtour, une pièce de coin dans les 4 coins, une pièce intérieure à l'intérieur, avec l'orientation imposée. Chaque pièce que tu valides affine la correction des couleurs entre tes photos et l'image de la boîte.</p>
+    <p>Sur les zones uniformes (ciel, mer), plusieurs cases se ressemblent : la bonne est alors parmi les premières propositions, pas forcément la première.</p>
   </details>
 </main>
 
@@ -130,7 +143,9 @@ summary{cursor:pointer}
 (() => {
 'use strict';
 const $ = id => document.getElementById(id);
-const CW = 24;                       // côté d'une case, en pixels, dans l'image de travail
+const CW1 = 24, CW2 = 56;            // côté d'une case (px) dans les images de travail grossière / fine
+const NR = 18;                       // orientations testées en recherche grossière (tous les 20°)
+const PHOTO_MAX = 1400, SEG_MAX = 500, REF_MAX = 2000;
 const COLORS = ['#ef4444','#f59e0b','#3b82f6','#a855f7','#14b8a6'];
 
 const store = {
@@ -140,8 +155,8 @@ const store = {
 
 const S = {
   ref:null, work:null, cols:20, rows:15, placed:[],
-  photo:null, mask:null, piece:null, mul:1, wb:true,
-  ranked:[], median:1, rejected:new Set(), shown:5, focus:-1, runId:0
+  photo:null, seg:null, mask:null, pz:null, piece:null, mul:1, wb:true, typeSel:'auto',
+  ranked:[], median:1, rejected:new Set(), shown:5, focus:-1, runId:0, calHist:[]
 };
 
 /* ---------- utilitaires image ---------- */
@@ -207,6 +222,14 @@ function yuv(d, n){
   }
   return {L, U, V};
 }
+function gradients(L, W, H){
+  const GX = new Float32Array(W * H), GY = new Float32Array(W * H);
+  for(let y = 1; y < H - 1; y++) for(let x = 1; x < W - 1; x++){
+    const i = y * W + x;
+    GX[i] = (L[i + 1] - L[i - 1]) * .5; GY[i] = (L[i + W] - L[i - W]) * .5;
+  }
+  return {GX, GY};
+}
 
 /* ---------- morphologie ---------- */
 function largestCC(mask, w, h){
@@ -268,7 +291,6 @@ function dims(){
   const W = num($('dimW').value), H = num($('dimH').value);
   return (W > 0 && H > 0) ? {W, H} : null;
 }
-// meilleure grille (colonnes × lignes) : bon nombre de pièces ET pièces presque carrées
 function computeGrid(W, H, N){
   let best = null;
   for(let c = 2; c <= 100; c++){
@@ -311,29 +333,33 @@ function applyDims(){
   if(g) setGrid(g.c, g.r); else updateCounts();
 }
 
-/* ---------- image de référence ---------- */
-function buildWork(){
-  if(!S.ref){ S.work = null; return; }
-  const cellW = S.ref.width / S.cols, cellH = S.ref.height / S.rows;
-  const ws = CW / Math.sqrt(cellW * cellH);
+/* ---------- image de référence (deux résolutions) ---------- */
+function buildLevel(target){
+  const cellW = S.ref.width / S.cols, cellH = S.ref.height / S.rows, cellS = Math.sqrt(cellW * cellH);
+  const cw = Math.min(target, cellS), ws = cw / cellS;
   const W = Math.max(8, Math.round(S.ref.width * ws)), H = Math.max(8, Math.round(S.ref.height * ws));
   const c = resize(S.ref, W, H);
-  const d = c.getContext('2d').getImageData(0, 0, W, H).data;
-  const {L, U, V} = yuv(d, W * H);
-  S.work = {W, H, L:boxBlur(L, W, H, 1), U:boxBlur(U, W, H, 1), V:boxBlur(V, W, H, 1)};
+  const t = yuv(c.getContext('2d').getImageData(0, 0, W, H).data, W * H);
+  const L = boxBlur(t.L, W, H, 1), U = boxBlur(t.U, W, H, 1), V = boxBlur(t.V, W, H, 1);
+  const g = gradients(L, W, H);
+  return {W, H, cw, L, U, V, GX:g.GX, GY:g.GY};
+}
+function buildWork(){
+  if(!S.ref){ S.work = null; return; }
+  S.work = {c:buildLevel(CW1), f:buildLevel(CW2)};
 }
 function setRef(c, fromUser){
   S.ref = c;
   if(fromUser){
     const g = calcGrid(c) || {c:20, r:15};
     S.cols = g.c; S.rows = g.r;
-    S.placed = [];
-    store.set('pf_placed', S.placed);
+    S.placed = []; S.calHist = [];
+    store.set('pf_placed', S.placed); store.set('pf_cal', S.calHist);
     store.set('pf_cols', S.cols); store.set('pf_rows', S.rows);
-    try { store.set('pf_ref', c.toDataURL('image/jpeg', .85)); } catch(e){}
+    try { store.set('pf_ref', c.toDataURL('image/jpeg', .82)); } catch(e){}
   }
   $('cols').value = S.cols; $('rows').value = S.rows;
-  buildWork(); clearResults(); redrawMap(); updateCounts();
+  buildWork(); clearResults(); redrawMap(); updateCounts(); updateCal();
 }
 
 /* ---------- carte ---------- */
@@ -357,7 +383,6 @@ function redrawMap(){
     for(let r = 1; r < S.rows; r++){ ctx.moveTo(0, r * sy); ctx.lineTo(w, r * sy); }
     ctx.stroke();
   }
-  ctx.fillStyle = 'rgba(22,163,74,.5)';
   ctx.font = 'bold ' + Math.max(8, Math.min(sx, sy) * .6) + 'px system-ui,sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   for(const key of S.placed){
@@ -393,6 +418,39 @@ function clearResults(){
 }
 function savePlaced(){ store.set('pf_placed', S.placed); }
 
+/* ---------- calibrage des couleurs (appris des validations) ---------- */
+const median = a => { const t = a.slice().sort((x, y) => x - y); return t[t.length >> 1]; };
+function cal(){
+  const h = S.calHist;
+  if(!h.length) return {gL:1, dU:0, dV:0, n:0};
+  return {gL:median(h.map(e => e.gL)), dU:median(h.map(e => e.dU)), dV:median(h.map(e => e.dV)), n:h.length};
+}
+function updateCal(){
+  const n = S.calHist.length;
+  $('calInfo').textContent = n
+    ? 'Calibrage des couleurs : appris sur ' + n + ' pièce' + (n > 1 ? 's' : '') + ' validée' + (n > 1 ? 's' : '') + '.'
+    : 'Le calibrage des couleurs (photos ↔ image de la boîte) s\'affine à chaque pièce validée.';
+}
+function sampleMeans(lv, pr, cx, cy, ang, m){
+  const ca = Math.cos(ang), sa = Math.sin(ang);
+  let n = 0, sl = 0, su = 0, sv = 0;
+  for(let i = 0; i < pr.N; i++){
+    const x = pr.QX[i] * m, y = pr.QY[i] * m;
+    const rx = (cx + x * ca - y * sa + .5) | 0, ry = (cy + x * sa + y * ca + .5) | 0;
+    if(rx < 0 || ry < 0 || rx >= lv.W || ry >= lv.H) continue;
+    const j = ry * lv.W + rx; sl += lv.L[j]; su += lv.U[j]; sv += lv.V[j]; n++;
+  }
+  return n ? {rL:sl / n, rU:su / n, rV:sv / n} : null;
+}
+function learn(r){
+  if(!S.piece || !S.work || r.x === undefined) return;
+  const pr = S.piece.f, mm = sampleMeans(S.work.f, pr, r.x, r.y, r.ang, r.m);
+  if(!mm || pr.mL < 15) return;
+  S.calHist.push({gL:Math.min(1.6, Math.max(.6, mm.rL / pr.mL)), dU:mm.rU - pr.mU, dV:mm.rV - pr.mV});
+  if(S.calHist.length > 15) S.calHist.shift();
+  store.set('pf_cal', S.calHist); updateCal();
+}
+
 /* ---------- détourage de la pièce ---------- */
 function setStatus(t, err){ const s = $('status'); s.textContent = t || ''; s.className = err ? 'err' : ''; }
 function setProgress(p){
@@ -400,10 +458,66 @@ function setProgress(p){
   if(p !== null) $('bar').style.width = Math.round(p * 100) + '%';
 }
 
-function analysePhoto(){
-  const P = S.photo, w = P.width, h = P.height, n = w * h;
+// côtés droits : une direction dont la droite d'appui touche une longue portion continue du contour
+function detectSides(mask, w, h, A, cx, cy){
+  const sq = Math.sqrt(A), tol = Math.max(2, .03 * sq), minRun = .6 * sq;
+  const bx = [], by = [];
+  for(let y = 1; y < h - 1; y++) for(let x = 1; x < w - 1; x++){
+    const i = y * w + x;
+    if(mask[i] && (!mask[i - 1] || !mask[i + 1] || !mask[i - w] || !mask[i + w])){ bx.push(x + .5 - cx); by.push(y + .5 - cy); }
+  }
+  const nb = bx.length;
+  if(nb < 20) return {type:'unknown', ang:[]};
+  const off = Math.ceil(2 * sq) + 8, bins = new Uint8Array(2 * off + 8), K = 180, flag = new Uint8Array(K);
+  for(let k = 0; k < K; k++){
+    const a = k * 2 * Math.PI / K, nx = Math.cos(a), ny = Math.sin(a), tx = -ny, ty = nx;
+    let hm = -1e9;
+    for(let b = 0; b < nb; b++){ const p = bx[b] * nx + by[b] * ny; if(p > hm) hm = p; }
+    bins.fill(0);
+    for(let b = 0; b < nb; b++) if(bx[b] * nx + by[b] * ny >= hm - tol) bins[Math.round(bx[b] * tx + by[b] * ty) + off] = 1;
+    let run = 0, best = 0, gap = 0, started = false;
+    for(let t = 0; t < bins.length; t++){
+      if(bins[t]){ if(started && gap <= 2) run += gap + 1; else run = 1; started = true; gap = 0; if(run > best) best = run; }
+      else if(started) gap++;
+    }
+    flag[k] = best >= minRun ? 1 : 0;
+  }
+  let s0 = -1;
+  for(let k = 0; k < K; k++) if(!flag[k]){ s0 = k; break; }
+  if(s0 < 0) return {type:'unknown', ang:[]};
+  const groups = [];
+  let cur = null;
+  for(let q = 1; q <= K; q++){
+    const k = (s0 + q) % K;
+    if(flag[k]){ if(!cur){ cur = {a:q, b:q}; } cur.b = q; }
+    else if(cur){ groups.push(cur); cur = null; }
+  }
+  let angs = groups.map(g => (((s0 + (g.a + g.b) / 2) % K) * 2 * Math.PI / K));
+  // fusion des groupes très proches
+  const merged = [];
+  for(const a of angs){
+    const m = merged.find(b => angDiff(a, b) < 25 * Math.PI / 180);
+    if(!m) merged.push(a);
+  }
+  angs = merged;
+  if(angs.length === 0) return {type:'interior', ang:[]};
+  if(angs.length === 1) return {type:'edge', ang:angs};
+  if(angs.length === 2){
+    const d = angDiff(angs[0], angs[1]) * 180 / Math.PI;
+    if(d > 65 && d < 115) return {type:'corner', ang:angs};
+  }
+  return {type:'unknown', ang:angs};
+}
+function angDiff(a, b){
+  let d = (a - b) % (2 * Math.PI);
+  if(d > Math.PI) d -= 2 * Math.PI;
+  if(d < -Math.PI) d += 2 * Math.PI;
+  return Math.abs(d);
+}
+
+function segment(){
+  const P = S.seg, w = P.width, h = P.height, n = w * h;
   const src = P.getContext('2d').getImageData(0, 0, w, h).data;
-  // couleur du fond = médiane du pourtour
   const band = Math.max(4, Math.round(Math.min(w, h) * .03));
   const rs = [], gs = [], bs = [];
   for(let y = 0; y < h; y += 2) for(let x = 0; x < w; x += 2){
@@ -413,7 +527,6 @@ function analysePhoto(){
   }
   const med = a => { const t = Uint8Array.from(a).sort(); return t[t.length >> 1]; };
   const bg = [med(rs), med(gs), med(bs)];
-  // distance au fond + seuil d'Otsu
   const dist = new Float32Array(n), hist = new Float64Array(256);
   for(let i = 0, j = 0; i < n; i++, j += 4){
     const dr = src[j] - bg[0], dg = src[j + 1] - bg[1], db = src[j + 2] - bg[2];
@@ -434,62 +547,105 @@ function analysePhoto(){
   let mask = new Uint8Array(n);
   for(let i = 0; i < n; i++) mask[i] = dist[i] > thr ? 1 : 0;
   mask = fillHoles(largestCC(mask, w, h), w, h);
-  S.mask = mask;
+  S.mask = mask; S.pz = null;
 
   let A = 0, sx = 0, sy = 0, x0 = w, x1 = 0, y0 = h, y1 = 0;
   for(let y = 0; y < h; y++) for(let x = 0; x < w; x++){
     if(mask[y * w + x]){
-      A++; sx += x; sy += y;
+      A++; sx += x + .5; sy += y + .5;
       if(x < x0) x0 = x; if(x > x1) x1 = x; if(y < y0) y0 = y; if(y > y1) y1 = y;
     }
   }
-  S.piece = null;
   if(A < n * .008){ setStatus('Pièce non détectée : fond non uni, ou pièce trop petite. Essaie de resserrer ou d\'élargir le détourage.', true); return false; }
   if(A > n * .7){ setStatus('Le détourage couvre presque toute la photo. Utilise un fond uni et resserre le détourage.', true); return false; }
-  const cx = sx / A, cy = sy / A;
-
-  // couleurs corrigées par le fond (balance des blancs)
-  const corr = new Uint8ClampedArray(src);
-  if(S.wb){
-    const g = bg.map(v => Math.min(2, Math.max(.5, 235 / Math.max(1, v))));
-    for(let j = 0; j < corr.length; j += 4){ corr[j] *= g[0]; corr[j + 1] *= g[1]; corr[j + 2] *= g[2]; }
-  }
-  const k = CW / Math.sqrt(A);
-  let {L, U, V} = yuv(corr, n);
-  const rb = Math.max(1, Math.round(.5 / k));
-  L = boxBlur(L, w, h, rb); U = boxBlur(U, w, h, rb); V = boxBlur(V, w, h, rb);
-
-  // zone intérieure de la pièce (on s'éloigne des bords : ombres, tranche)
-  let r = Math.max(2, Math.round(.14 * Math.sqrt(A)));
-  let er = erode(mask, w, h, r), cnt = 0;
-  for(let i = 0; i < n; i++) cnt += er[i];
-  if(cnt < 60){ er = erode(mask, w, h, Math.max(1, r >> 1)); cnt = 0; for(let i = 0; i < n; i++) cnt += er[i]; }
-  if(cnt < 20){ setStatus('Pièce trop petite ou mal détourée.', true); return false; }
-  const st = Math.max(1, Math.round(Math.sqrt(cnt / 220)));
-  const qx = [], qy = [], ql = [], qu = [], qv = [];
-  for(let y = 0; y < h; y += st) for(let x = 0; x < w; x += st){
-    const i = y * w + x;
-    if(er[i]){ qx.push((x - cx) * k); qy.push((y - cy) * k); ql.push(L[i]); qu.push(U[i]); qv.push(V[i]); }
-  }
-  // découpe de la pièce (pour les vignettes)
-  const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
-  const cut = document.createElement('canvas'); cut.width = bw; cut.height = bh;
-  const cctx = cut.getContext('2d'), cid = cctx.createImageData(bw, bh);
-  for(let y = 0; y < bh; y++) for(let x = 0; x < bw; x++){
-    const i = (y + y0) * w + (x + x0), o = (y * bw + x) * 4;
-    cid.data[o] = corr[i * 4]; cid.data[o + 1] = corr[i * 4 + 1]; cid.data[o + 2] = corr[i * 4 + 2];
-    cid.data[o + 3] = mask[i] ? 255 : 0;
-  }
-  cctx.putImageData(cid, 0, 0);
-
-  S.piece = {A, cx, cy, bx:x0, by:y0, N:qx.length,
-    QX:Float32Array.from(qx), QY:Float32Array.from(qy), QL:Float32Array.from(ql),
-    QU:Float32Array.from(qu), QV:Float32Array.from(qv), cutout:cut};
+  const cxs = sx / A, cys = sy / A;
+  S.pz = {w, h, mask, A, cxs, cys, x0, x1, y0, y1, bg, f:S.photo.width / w,
+          sides:detectSides(mask, w, h, A, cxs, cys)};
   return true;
 }
 
+// représentation de la pièce à l'échelle d'une case de taille cw (px) : points échantillonnés + statistiques
+function pieceRep(crop, X0, Y0, Afull, cxF, cyF, cw){
+  const z = S.pz, f = z.f;
+  const k = cw / Math.sqrt(Afull);
+  const bw = Math.max(8, Math.ceil(crop.width * k)), bh = Math.max(8, Math.ceil(crop.height * k));
+  const kx = bw / crop.width, ky = bh / crop.height;
+  const data = resize(crop, bw, bh).getContext('2d').getImageData(0, 0, bw, bh).data;
+  if(S.wb){
+    const g = z.bg.map(v => Math.min(2, Math.max(.5, 235 / Math.max(1, v))));
+    for(let j = 0; j < data.length; j += 4){ data[j] *= g[0]; data[j + 1] *= g[1]; data[j + 2] *= g[2]; }
+  }
+  const mw = new Uint8Array(bw * bh);
+  for(let j = 0; j < bh; j++) for(let i = 0; i < bw; i++){
+    const xs = ((X0 + (i + .5) / kx) / f) | 0, ys = ((Y0 + (j + .5) / ky) / f) | 0;
+    if(xs >= 0 && ys >= 0 && xs < z.w && ys < z.h) mw[j * bw + i] = z.mask[ys * z.w + xs];
+  }
+  const cxw = (cxF - X0) * kx, cyw = (cyF - Y0) * ky;
+  const t = yuv(data, bw * bh);
+  const L = boxBlur(t.L, bw, bh, 1), U = boxBlur(t.U, bw, bh, 1), V = boxBlur(t.V, bw, bh, 1);
+  const g = gradients(L, bw, bh);
+  let r = Math.max(1, Math.round(.14 * cw));
+  let er = erode(mw, bw, bh, r), cnt = 0;
+  for(let i = 0; i < er.length; i++) cnt += er[i];
+  if(cnt < 30){ er = erode(mw, bw, bh, Math.max(1, r >> 1)); cnt = 0; for(let i = 0; i < er.length; i++) cnt += er[i]; }
+  if(cnt < 15) return null;
+  const st = Math.max(1, Math.round(Math.sqrt(cnt / 400)));
+  const qx = [], qy = [], ql = [], qu = [], qv = [], qgx = [], qgy = [];
+  for(let y = 0; y < bh; y += st) for(let x = 0; x < bw; x += st){
+    const i = y * bw + x;
+    if(er[i]){ qx.push(x + .5 - cxw); qy.push(y + .5 - cyw); ql.push(L[i]); qu.push(U[i]); qv.push(V[i]); qgx.push(g.GX[i]); qgy.push(g.GY[i]); }
+  }
+  const N = qx.length;
+  let mL = 0, mU = 0, mV = 0;
+  for(let i = 0; i < N; i++){ mL += ql[i]; mU += qu[i]; mV += qv[i]; }
+  mL /= N; mU /= N; mV /= N;
+  let vP = 0, gm = 0;
+  for(let i = 0; i < N; i++){
+    ql[i] -= mL; qu[i] -= mU; qv[i] -= mV;
+    vP += ql[i] * ql[i] + qu[i] * qu[i] + qv[i] * qv[i];
+    gm += qgx[i] * qgx[i] + qgy[i] * qgy[i];
+  }
+  vP /= N; gm /= N;
+  return {N, QX:Float32Array.from(qx), QY:Float32Array.from(qy), QL:Float32Array.from(ql), QU:Float32Array.from(qu),
+          QV:Float32Array.from(qv), QGX:Float32Array.from(qgx), QGY:Float32Array.from(qgy),
+          mL, mU, mV, vP, gm, conf:vP / (vP + 30)};
+}
+
+function buildPiece(){
+  const z = S.pz, f = z.f, Pf = S.photo;
+  const X0 = Math.max(0, Math.floor(z.x0 * f)), Y0 = Math.max(0, Math.floor(z.y0 * f));
+  const X1 = Math.min(Pf.width, Math.ceil((z.x1 + 1) * f)), Y1 = Math.min(Pf.height, Math.ceil((z.y1 + 1) * f));
+  const crop = document.createElement('canvas'); crop.width = X1 - X0; crop.height = Y1 - Y0;
+  crop.getContext('2d').drawImage(Pf, X0, Y0, crop.width, crop.height, 0, 0, crop.width, crop.height);
+  const Afull = z.A * f * f, cxF = z.cxs * f, cyF = z.cys * f;
+  const c = pieceRep(crop, X0, Y0, Afull, cxF, cyF, S.work.c.cw);
+  const fi = pieceRep(crop, X0, Y0, Afull, cxF, cyF, S.work.f.cw);
+  if(!c || !fi){ S.piece = null; setStatus('Pièce trop petite ou mal détourée.', true); return false; }
+  // vignette (découpe de la pièce, fond transparent)
+  const cs = 120, kc = cs / Math.sqrt(Afull);
+  const cw_ = Math.max(8, Math.ceil(crop.width * kc)), ch_ = Math.max(8, Math.ceil(crop.height * kc));
+  const kx = cw_ / crop.width, ky = ch_ / crop.height;
+  const cut = resize(crop, cw_, ch_), cctx = cut.getContext('2d'), cid = cctx.getImageData(0, 0, cw_, ch_);
+  const gains = S.wb ? z.bg.map(v => Math.min(2, Math.max(.5, 235 / Math.max(1, v)))) : [1, 1, 1];
+  for(let j = 0; j < ch_; j++) for(let i = 0; i < cw_; i++){
+    const xs = ((X0 + (i + .5) / kx) / f) | 0, ys = ((Y0 + (j + .5) / ky) / f) | 0;
+    const o = (j * cw_ + i) * 4;
+    cid.data[o] *= gains[0]; cid.data[o + 1] *= gains[1]; cid.data[o + 2] *= gains[2];
+    cid.data[o + 3] = (xs >= 0 && ys >= 0 && xs < z.w && ys < z.h && z.mask[ys * z.w + xs]) ? 255 : 0;
+  }
+  cctx.putImageData(cid, 0, 0);
+  S.piece = {c, f:fi, cutout:cut, cutSize:cs, ccx:(cxF - X0) * kx, ccy:(cyF - Y0) * ky};
+  return true;
+}
+
+function analysePhoto(){
+  S.seg = fit(S.photo, SEG_MAX);
+  if(!segment()) return false;
+  return buildPiece();
+}
+
 function drawPiece(){
-  const cv = $('pieceCanvas'), P = S.photo, w = P.width, h = P.height;
+  const cv = $('pieceCanvas'), P = S.seg, w = P.width, h = P.height;
   cv.width = w; cv.height = h;
   const ctx = cv.getContext('2d'); ctx.drawImage(P, 0, 0);
   const m = S.mask; if(!m) return;
@@ -502,81 +658,216 @@ function drawPiece(){
   ctx.putImageData(id, 0, 0);
 }
 
-/* ---------- recherche ---------- */
-async function runSearch(){
-  const id = ++S.runId;
-  const wk = S.work, p = S.piece;
-  if(!wk || !p) return;
-  const {W, H, L, U, V} = wk, N = p.N, QX = p.QX, QY = p.QY, QL = p.QL, QU = p.QU, QV = p.QV;
-  const minN = N * .7;
+/* ---------- contraintes de type (intérieur / bord / coin) ---------- */
+const AL = {top:-Math.PI / 2, bottom:Math.PI / 2, left:Math.PI, right:0};
+function outward(col, row){
+  const o = [];
+  if(row === 0) o.push(AL.top);
+  if(col === 0) o.push(AL.left);
+  if(row === S.rows - 1) o.push(AL.bottom);
+  if(col === S.cols - 1) o.push(AL.right);
+  return o;
+}
+function effType(){
+  const sel = S.typeSel, det = S.pz ? S.pz.sides.type : 'unknown';
+  return sel === 'auto' ? det : sel;
+}
+// null = case exclue ; {rots:null} = toutes orientations ; {rots:[θ…]} = orientations imposées
+function constraintFor(col, row){
+  const type = effType(), out = outward(col, row), nb = out.length, s = S.pz.sides;
+  if(type === 'interior') return nb === 0 ? {rots:null} : null;
+  if(type === 'edge'){
+    if(nb !== 1) return null;
+    return s.type === 'edge' ? {rots:[out[0] - s.ang[0]]} : {rots:null};
+  }
+  if(type === 'corner'){
+    if(nb !== 2) return null;
+    if(s.type !== 'corner') return {rots:null};
+    const rots = [];
+    for(const [a, b] of [[out[0], out[1]], [out[1], out[0]]]){
+      const t1 = a - s.ang[0], t2 = b - s.ang[1];
+      if(angDiff(t1, t2) < .45) rots.push(Math.atan2(Math.sin(t1) + Math.sin(t2), Math.cos(t1) + Math.cos(t2)));
+    }
+    return rots.length ? {rots} : null;
+  }
+  return {rots:null};
+}
+function showType(){
+  const s = S.pz ? S.pz.sides : null;
+  if(!s){ $('typeInfo').textContent = ''; return; }
+  const names = {interior:'pièce intérieure (aucun côté droit)', edge:'pièce de bord (1 côté droit)', corner:'pièce de coin (2 côtés droits)', unknown:'indéterminé'};
+  let t = 'Détecté : ' + names[s.type] + '.';
+  if(S.typeSel !== 'auto') t += ' Choix manuel : ' + {interior:'intérieure', edge:'bord', corner:'coin'}[S.typeSel] + '.';
+  else if(s.type === 'unknown') t += ' Aucune restriction de zone.';
+  $('typeInfo').textContent = t;
+}
 
-  function score(cx, cy, ca, sa, m){
-    let n = 0, sy = 0, syy = 0, sc = 0;
+/* ---------- comparaison pièce / image ---------- */
+// coût : 0 = parfait. Combine corrélation normalisée (forme des motifs, couleur incluse),
+// corrélation des gradients (contours, ombres) et un terme de couleur moyenne.
+function makeScorer(lv, pr, cl){
+  const W = lv.W, H = lv.H, L = lv.L, U = lv.U, V = lv.V, GX = lv.GX, GY = lv.GY;
+  const N = pr.N, QX = pr.QX, QY = pr.QY, QL = pr.QL, QU = pr.QU, QV = pr.QV, QGX = pr.QGX, QGY = pr.QGY;
+  const minN = N * .9, vP = pr.vP, gm = pr.gm, conf = pr.conf;
+  const pL = pr.mL * cl.gL, pU = pr.mU + cl.dU, pV = pr.mV + cl.dV;
+  const wc = .6 + .2 * Math.min(3, cl.n || 0);   // la couleur absolue compte davantage une fois le calibrage appris
+  const EPS = 6, EG = .6;
+  return function(cx, cy, ca, sa, m){
+    let n = 0, sL = 0, sU = 0, sV = 0, sL2 = 0, sU2 = 0, sV2 = 0, cL = 0, cU = 0, cV = 0, qa = 0, qb = 0, qc = 0, gd = 0, gr = 0;
     for(let i = 0; i < N; i++){
       const x = QX[i] * m, y = QY[i] * m;
       const rx = (cx + x * ca - y * sa + .5) | 0, ry = (cy + x * sa + y * ca + .5) | 0;
       if(rx < 0 || ry < 0 || rx >= W || ry >= H) continue;
-      const j = ry * W + rx;
-      const dy = QL[i] - L[j];
-      sy += dy; syy += dy * dy;
-      sc += Math.abs(QU[i] - U[j]) + Math.abs(QV[i] - V[j]);
+      const j = ry * W + rx, rl = L[j], ru = U[j], rv = V[j];
+      sL += rl; sU += ru; sV += rv; sL2 += rl * rl; sU2 += ru * ru; sV2 += rv * rv;
+      const ql = QL[i], qu = QU[i], qv = QV[i];
+      cL += ql * rl; cU += qu * ru; cV += qv * rv; qa += ql; qb += qu; qc += qv;
+      const gx = QGX[i], gy = QGY[i], rgx = GX[j], rgy = GY[j];
+      gd += (gx * ca - gy * sa) * rgx + (gx * sa + gy * ca) * rgy;
+      gr += rgx * rgx + rgy * rgy;
       n++;
     }
     if(n < minN) return Infinity;
-    const mean = sy / n, vr = Math.max(0, syy / n - mean * mean);
-    return sc / n + .6 * Math.sqrt(vr) + .3 * Math.abs(mean);
+    const iN = 1 / n, mL = sL * iN, mU = sU * iN, mV = sV * iN;
+    const cov = (cL - qa * mL + cU - qb * mU + cV - qc * mV) * iN;
+    const vR = Math.max(0, (sL2 * iN - mL * mL) + (sU2 * iN - mU * mU) + (sV2 * iN - mV * mV));
+    const rho = cov / Math.sqrt((vP + EPS) * (vR + EPS));
+    const rg = (gd * iN) / Math.sqrt((gm + EG) * (gr * iN + EG));
+    const st = 1 - .55 * rho - .45 * rg;
+    const col = (Math.abs(pU - mU) + Math.abs(pV - mV)) / 70 + .4 * Math.abs(pL - mL) / 60;
+    // cohérence du contraste : la zone de l'image doit avoir une énergie de motif comparable à celle de la pièce
+    const lv = Math.log((vR + EPS) / (vP + EPS)), lg = Math.log((gr * iN + EG) / (gm + EG));
+    const pen = .2 * (Math.min(6, lv * lv) + Math.min(6, lg * lg));
+    return 3 * conf * st + wc * col + pen + 4 * (m - 1) * (m - 1);
+  };
+}
+
+// recherche locale (position, angle, échelle) de plus en plus fine
+function refine(sc, x, y, a, m, cwF){
+  let best = sc(x, y, Math.cos(a), Math.sin(a), m);
+  if(!isFinite(best)) return {s:best, x, y, a, m};
+  const st = [.1 * cwF, 8 * Math.PI / 180, .05];
+  for(let lvl = 0; lvl < 4; lvl++){
+    for(let guard = 0; guard < 8; guard++){
+      let imp = false;
+      for(let p = 0; p < 4; p++) for(const sg of [1, -1]){
+        let nx = x, ny = y, na = a, nm = m;
+        if(p === 0) nx += sg * st[0]; else if(p === 1) ny += sg * st[0]; else if(p === 2) na += sg * st[1];
+        else nm = Math.min(1.12, Math.max(.9, nm + sg * st[2]));
+        const s = sc(nx, ny, Math.cos(na), Math.sin(na), nm);
+        if(s < best - 1e-6){ best = s; x = nx; y = ny; a = na; m = nm; imp = true; }
+      }
+      if(!imp) break;
+    }
+    st[0] *= .5; st[1] *= .5; st[2] *= .5;
   }
+  return {s:best, x, y, a, m};
+}
 
-  const cols = S.cols, rows = S.rows, nc = cols * rows, cw = W / cols, ch = H / rows;
+const tick = () => new Promise(r => setTimeout(r, 0));
+
+async function runSearch(){
+  const id = ++S.runId;
+  const wk = S.work, pz = S.piece;
+  if(!wk || !pz) return;
+  const lc = wk.c, lf = wk.f, cl = cal();
+  const scC = makeScorer(lc, pz.c, cl), scF = makeScorer(lf, pz.f, cl);
+  const cols = S.cols, rows = S.rows, nc = cols * rows;
+  const cwx = lc.W / cols, chy = lc.H / rows;
   const placed = new Set(S.placed);
-  const best = new Float32Array(nc).fill(Infinity);
-  const bx = new Float32Array(nc), by = new Float32Array(nc), ba = new Float32Array(nc), bm = new Float32Array(nc);
-  const NR = 18, scales = [.9, 1, 1.1], cs = [], sn = [];
-  for(let r = 0; r < NR; r++){ const a = r * 2 * Math.PI / NR; cs.push(Math.cos(a)); sn.push(Math.sin(a)); }
-  const step = CW / 4;
-  let last = performance.now();
 
-  for(let y = step / 2; y < H; y += step){
-    const row = Math.min(rows - 1, Math.floor(y / ch));
-    for(let x = step / 2; x < W; x += step){
-      const col = Math.min(cols - 1, Math.floor(x / cw)), ci = row * cols + col;
-      if(placed.has(col + ',' + row)) continue;
-      for(let si = 0; si < 3; si++) for(let r = 0; r < NR; r++){
-        const s = score(x, y, cs[r], sn[r], scales[si]);
-        if(s < best[ci]){ best[ci] = s; bx[ci] = x; by[ci] = y; ba[ci] = r * 2 * Math.PI / NR; bm[ci] = scales[si]; }
+  // cases autorisées et orientations imposées
+  let cons = new Array(nc), anyOk = 0;
+  for(let ci = 0; ci < nc; ci++){
+    const col = ci % cols, row = (ci / cols) | 0;
+    if(placed.has(col + ',' + row)){ cons[ci] = null; continue; }
+    cons[ci] = constraintFor(col, row);
+    if(cons[ci]) anyOk++;
+  }
+  let relaxed = false;
+  if(!anyOk){
+    relaxed = true;
+    for(let ci = 0; ci < nc; ci++) cons[ci] = placed.has((ci % cols) + ',' + ((ci / cols) | 0)) ? null : {rots:null};
+  }
+  const rotStep = 2 * Math.PI / NR, cs = [], sn = [];
+  for(let r = 0; r < NR; r++){ cs.push(Math.cos(r * rotStep)); sn.push(Math.sin(r * rotStep)); }
+  const allRots = []; for(let r = 0; r < NR; r++) allRots.push(r);
+  const allowed = cons.map(c => {
+    if(!c) return null;
+    if(!c.rots) return allRots;
+    const l = allRots.filter(r => c.rots.some(t => angDiff(r * rotStep, t) <= 1.3 * rotStep));
+    return l.length ? l : allRots;
+  });
+
+  // passe grossière : toutes positions × orientations
+  const scoreR = new Float32Array(nc * NR).fill(Infinity), pxR = new Float32Array(nc * NR), pyR = new Float32Array(nc * NR);
+  const step = lc.cw / 4;
+  let last = performance.now();
+  for(let y = step / 2; y < lc.H; y += step){
+    const row = Math.min(rows - 1, Math.floor(y / chy));
+    for(let x = step / 2; x < lc.W; x += step){
+      const col = Math.min(cols - 1, Math.floor(x / cwx)), ci = row * cols + col, al = allowed[ci];
+      if(!al) continue;
+      for(let q = 0; q < al.length; q++){
+        const r = al[q], s = scC(x, y, cs[r], sn[r], 1), idx = ci * NR + r;
+        if(s < scoreR[idx]){ scoreR[idx] = s; pxR[idx] = x; pyR[idx] = y; }
       }
     }
     if(performance.now() - last > 40){
-      setProgress(y / H); setStatus('Recherche… ' + Math.round(100 * y / H) + ' %');
-      await new Promise(r => setTimeout(r, 0)); last = performance.now();
+      setProgress(.6 * y / lc.H); setStatus('Recherche… ' + Math.round(60 * y / lc.H) + ' %');
+      await tick(); last = performance.now();
       if(id !== S.runId) return;
     }
   }
+  const cellBest = new Float32Array(nc).fill(Infinity);
+  for(let ci = 0; ci < nc; ci++) for(let r = 0; r < NR; r++) if(scoreR[ci * NR + r] < cellBest[ci]) cellBest[ci] = scoreR[ci * NR + r];
+  const order = [];
+  for(let ci = 0; ci < nc; ci++) if(isFinite(cellBest[ci])) order.push(ci);
+  order.sort((a, b) => cellBest[a] - cellBest[b]);
 
-  // affinage des meilleures cases
-  let order = [];
-  for(let i = 0; i < nc; i++) if(isFinite(best[i])) order.push(i);
-  order.sort((a, b) => best[a] - best[b]);
-  const K = Math.min(15, order.length);
+  // passe fine : affinage des meilleures cases
+  const K = Math.min(order.length, Math.min(200, Math.max(60, Math.round(nc * .2))));
+  const ratio = lf.cw / lc.cw, cwf = lf.W / cols, chf = lf.H / rows;
+  const fine = new Map();
   for(let t = 0; t < K; t++){
-    const i = order[t];
-    let bs = best[i], x0 = bx[i], y0 = by[i], a0 = ba[i], m0 = bm[i];
-    const nx = x0, ny = y0, na = a0, nm = m0;
-    for(let da = -10; da <= 10; da += 5)
-      for(let dm = -.05; dm <= .051; dm += .05)
-        for(let dx = -3; dx <= 3; dx += 1.5)
-          for(let dy = -3; dy <= 3; dy += 1.5){
-            const a = na + da * Math.PI / 180;
-            const s = score(nx + dx, ny + dy, Math.cos(a), Math.sin(a), nm + dm);
-            if(s < bs){ bs = s; x0 = nx + dx; y0 = ny + dy; a0 = a; m0 = nm + dm; }
-          }
-    best[i] = bs; bx[i] = x0; by[i] = y0; ba[i] = a0; bm[i] = m0;
+    const ci = order[t];
+    const starts = [];
+    const rs = allRots.filter(r => isFinite(scoreR[ci * NR + r])).sort((a, b) => scoreR[ci * NR + a] - scoreR[ci * NR + b]);
+    const picked = [];
+    for(const r of rs){
+      if(picked.length >= 6) break;
+      if(picked.every(p => Math.min((p - r + NR) % NR, (r - p + NR) % NR) >= 2)) picked.push(r);
+    }
+    for(const r of picked) starts.push({x:pxR[ci * NR + r] * ratio, y:pyR[ci * NR + r] * ratio, a:r * rotStep});
+    const c0 = cons[ci];
+    if(c0 && c0.rots && picked.length){
+      const b = picked[0];
+      for(const th of c0.rots) starts.push({x:pxR[ci * NR + b] * ratio, y:pyR[ci * NR + b] * ratio, a:th});
+    }
+    for(const s0 of starts){
+      const res = refine(scF, s0.x, s0.y, s0.a, 1, lf.cw);
+      if(!isFinite(res.s)) continue;
+      const col = Math.min(cols - 1, Math.max(0, Math.floor(res.x / cwf))), row = Math.min(rows - 1, Math.max(0, Math.floor(res.y / chf)));
+      const ci2 = row * cols + col;
+      if(!cons[ci2]) continue;
+      const prev = fine.get(ci2);
+      if(!prev || res.s < prev.s) fine.set(ci2, res);
+    }
+    if(performance.now() - last > 40){
+      setProgress(.6 + .4 * t / K); setStatus('Affinage… ' + Math.round(60 + 40 * t / K) + ' %');
+      await tick(); last = performance.now();
+      if(id !== S.runId) return;
+    }
   }
-  order.sort((a, b) => best[a] - best[b]);
   if(id !== S.runId) return;
 
-  S.median = order.length ? best[order[order.length >> 1]] : 1;
-  S.ranked = order.map(i => ({i, col:i % cols, row:(i / cols) | 0, score:best[i], ang:ba[i], m:bm[i]}));
+  const refined = [...fine.entries()].map(([ci, r]) => ({i:ci, col:ci % cols, row:(ci / cols) | 0, score:r.s, ang:r.a, m:r.m, x:r.x, y:r.y}));
+  refined.sort((a, b) => a.score - b.score);
+  const inRef = new Set(refined.map(r => r.i));
+  const rest = order.filter(ci => !inRef.has(ci)).map(ci => ({i:ci, col:ci % cols, row:(ci / cols) | 0, score:cellBest[ci] + 5, ang:0, m:1}));
+  S.median = refined.length ? refined[refined.length >> 1].score : 1;
+  S.ranked = refined.concat(rest);
+  S.relaxed = relaxed;
   S.rejected = new Set(); S.shown = 5; S.focus = -1;
   setProgress(null); setStatus('');
   renderResults();
@@ -600,8 +891,8 @@ function drawPieceThumb(cv, ang, m){
   ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.strokeRect(T / 3, T / 3, T / 3, T / 3);
   ctx.save();
   ctx.translate(T / 2, T / 2); ctx.rotate(ang);
-  const sc = (T / 3) / Math.sqrt(p.A) * m; ctx.scale(sc, sc);
-  ctx.drawImage(p.cutout, -(p.cx - p.bx), -(p.cy - p.by));
+  const sc = (T / 3) / p.cutSize * m; ctx.scale(sc, sc);
+  ctx.drawImage(p.cutout, -p.ccx, -p.ccy);
   ctx.restore();
 }
 function rotText(ang){
@@ -621,8 +912,10 @@ function renderResults(){
     $('moreBtn').hidden = true; redrawMap(); return;
   }
   const ratio = list[0].score / (S.median || 1);
-  const conf = ratio < .55 ? 'Très probable' : ratio < .8 ? 'Probable' : 'Incertain (zone peu distinctive)';
-  $('resultsHead').textContent = 'Meilleure proposition : ' + conf.toLowerCase() + '.';
+  const gap = list.length > 1 ? list[1].score - list[0].score : 1;
+  const conf = (ratio < .6 && gap > .15) ? 'Très probable' : ratio < .8 ? 'Probable' : 'Incertain (zone peu distinctive)';
+  $('resultsHead').textContent = 'Meilleure proposition : ' + conf.toLowerCase() + '.' +
+    (S.relaxed ? ' (Le type de pièce détecté ne correspond à aucune case libre : recherche sans restriction.)' : '');
 
   list.slice(0, S.shown).forEach((r, k) => {
     const card = document.createElement('div'); card.className = 'cand';
@@ -645,8 +938,9 @@ function renderResults(){
 }
 
 function validate(r){
+  learn(r);
   S.placed.push(r.col + ',' + r.row); savePlaced();
-  S.piece = null; S.mask = null; S.photo = null;
+  S.piece = null; S.mask = null; S.photo = null; S.pz = null;
   clearResults();
   $('pieceBox').hidden = true;
   setStatus('✓ Pièce enregistrée en ligne ' + (r.row + 1) + ', colonne ' + (r.col + 1) + '. Photographie la suivante.');
@@ -666,9 +960,9 @@ async function process(){
       again = false;
       clearResults();
       setStatus('Détourage de la pièce…');
-      await new Promise(r => setTimeout(r, 0));
+      await tick();
       const ok = analysePhoto();
-      drawPiece();
+      drawPiece(); showType();
       if(!ok){ setProgress(null); break; }
       setStatus('Recherche…'); setProgress(0);
       await runSearch();
@@ -682,7 +976,7 @@ async function onPieceFile(file){
   if(!file) return;
   try {
     const im = await loadImg(file);
-    S.photo = fit(im, 600);
+    S.photo = fit(im, PHOTO_MAX);
     $('pieceBox').hidden = false;
     await process();
   } catch(e){ setStatus('Impossible de lire cette photo.', true); }
@@ -692,7 +986,7 @@ async function onPieceFile(file){
 $('refFile').addEventListener('change', async e => {
   const f = e.target.files[0]; e.target.value = '';
   if(!f) return;
-  try { setRef(fit(await loadImg(f), 1400), true); }
+  try { setRef(fit(await loadImg(f), REF_MAX), true); }
   catch(err){ alert('Impossible de lire cette image.'); }
 });
 ['pieceCam', 'pieceGal'].forEach(id => $(id).addEventListener('change', e => {
@@ -708,6 +1002,7 @@ $('gridChk').addEventListener('change', redrawMap);
 let deb;
 $('mul').addEventListener('input', e => { S.mul = +e.target.value; clearTimeout(deb); deb = setTimeout(process, 300); });
 $('wbChk').addEventListener('change', e => { S.wb = e.target.checked; process(); });
+$('ptype').addEventListener('change', e => { S.typeSel = e.target.value; process(); });
 $('moreBtn').addEventListener('click', () => { S.shown += 5; renderResults(); });
 $('undoBtn').addEventListener('click', () => { S.placed.pop(); savePlaced(); redrawMap(); updateCounts(); });
 $('resetBtn').addEventListener('click', () => {
@@ -727,17 +1022,18 @@ window.addEventListener('resize', () => { clearTimeout(rdeb); rdeb = setTimeout(
 
 /* ---------- démarrage ---------- */
 S.cols = store.get('pf_cols', 20); S.rows = store.get('pf_rows', 15); S.placed = store.get('pf_placed', []);
+S.calHist = store.get('pf_cal', []);
 $('cols').value = S.cols; $('rows').value = S.rows;
 { const d = store.get('pf_dims', null); if(d){ $('dimW').value = d.w || ''; $('dimH').value = d.h || ''; $('nbPieces').value = d.n || 300; } }
-updateCounts();
+updateCounts(); updateCal();
 const saved = store.get('pf_ref', null);
 if(saved){
   const im = new Image();
-  im.onload = () => setRef(fit(im, 1400), false);
+  im.onload = () => setRef(fit(im, REF_MAX), false);
   im.src = saved;
 } else redrawMap();
 
-if(window.__PF_TEST) window.__pf = {S, setRef, analysePhoto, runSearch, buildWork};
+if(window.__PF_TEST) window.__pf = {S, setRef, analysePhoto, runSearch, buildWork, learn, cal};
 })();
 </script>
 </body>
