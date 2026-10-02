@@ -125,7 +125,7 @@ summary{cursor:pointer}
 
   <details class="card">
     <summary>Comment ça marche ?</summary>
-    <p>Chaque pièce de la photo est détourée, numérotée, puis ramenée à la taille d'une case de la grille. Elle est comparée à chaque case sous toutes les orientations, d'abord en basse résolution sur tout le puzzle, puis en haute résolution sur les meilleures candidates. La comparaison porte surtout sur la forme des motifs (courbes, ombres, contours), pas sur la couleur moyenne.</p>
+    <p>Chaque pièce de la photo est détourée, numérotée, puis remise à l'échelle d'une case de la grille (rectangulaire si ton puzzle l'est). Son orientation est déduite de la forme de son corps : une pièce posée dans le puzzle est toujours droite, il ne reste donc que 4 orientations possibles (à quelques degrés près). Elle est comparée à chaque case, d'abord en basse résolution sur tout le puzzle, puis plus finement sur les meilleures candidates, et enfin presque pixel à pixel à la résolution de l'image du puzzle sur les 10 meilleures.</p>
     <p>Les pièces avec reflet (zones blanches saturées) ou trop sombres sont ignorées, car leur couleur n'est plus fiable. Deux pièces d'une même photo ne peuvent pas recevoir la même case.</p>
     <p>Chaque pièce que tu valides affine la correction des couleurs entre tes photos et l'image de la boîte. Sur les zones uniformes (ciel, mer), la proposition peut être fausse : refuse-la pour voir la suivante.</p>
   </details>
@@ -137,8 +137,10 @@ summary{cursor:pointer}
 const $ = id => document.getElementById(id);
 const CW1 = 24, CW2 = 56;
 const CB1 = 4, CB2 = 1;              // flou (rayon, px) des images de travail grossière / fine : bassin de recherche plus large en grossier
-const NR = 18;                       // orientations testées en recherche grossière (tous les 20°)
-const PHOTO_MAX = 1400, SEG_MAX = 900, REF_MAX = 2000;
+const NR_FREE = 18;                  // orientations testées si l'orientation de la pièce n'a pas pu être déduite de sa forme
+const OFFS = [-8, -4, 0, 4, 8];      // écarts d'angle (°) autour des 4 orientations alignées sur la grille
+const CB3 = 1, PIX_PTS = 2500, NTOP3 = 10;   // comparaison fine à la résolution de l'image d'origine
+const PHOTO_MAX = 2400, SEG_MAX = 900, REF_MAX = 2400;
 const COLORS = ['#ef4444','#f59e0b','#3b82f6','#a855f7','#14b8a6','#ec4899','#84cc16','#0ea5e9'];
 const COLORS_RGB = COLORS.map(h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]);
 
@@ -520,6 +522,23 @@ function angDiff(a, b){
   if(d < -Math.PI) d += 2 * Math.PI;
   return Math.abs(d);
 }
+// orientation de la pièce : les bords de son corps sont alignés sur une grille à 90° ; les têtons et creux se répartissent
+// dans toutes les directions et se compensent. On moyenne donc les normales du contour au quadruple de leur angle.
+function pieceAlpha(c){
+  const z = S.pz, pad = 4, bw = c.x1 - c.x0 + 1 + 2 * pad, bh = c.y1 - c.y0 + 1 + 2 * pad, m = new Float32Array(bw * bh);
+  for(let y = c.y0; y <= c.y1; y++) for(let x = c.x0; x <= c.x1; x++)
+    if(z.lab[y * z.w + x] === c.id) m[(y - c.y0 + pad) * bw + (x - c.x0 + pad)] = 1;
+  const s = boxBlur(boxBlur(m, bw, bh, 2), bw, bh, 2);
+  let re = 0, im = 0, tot = 0;
+  for(let y = 1; y < bh - 1; y++) for(let x = 1; x < bw - 1; x++){
+    const i = y * bw + x, gx = (s[i + 1] - s[i - 1]) / 2, gy = (s[i + bw] - s[i - bw]) / 2, mag = Math.hypot(gx, gy);
+    if(mag < .01) continue;
+    const phi = Math.atan2(gy, gx);
+    re += mag * Math.cos(4 * phi); im += mag * Math.sin(4 * phi); tot += mag;
+  }
+  return {alpha:Math.atan2(im, re) / 4, conf:Math.hypot(re, im) / (tot || 1)};
+}
+
 function segment(){
   const P = S.seg, w = P.width, h = P.height, n = w * h;
   const src = P.getContext('2d').getImageData(0, 0, w, h).data;
@@ -527,7 +546,8 @@ function segment(){
   const ch = [0, 1, 2].map(k => { const t = new Float32Array(n); for(let i = 0, j = k; i < n; i++, j += 4) t[i] = src[j]; return boxBlur(t, w, h, 1); });
   const kk = Math.max(3, Math.round(Math.max(w, h) / 150)), sw = Math.ceil(w / kk), sh = Math.ceil(h / kk);
   let win = Math.max(5, Math.round(.16 * Math.min(w, h) / kk)); if(win % 2 === 0) win++;
-  const hw = win >> 1, mdl = [];
+  const hw = win >> 1, sms = [], mdl1 = [], mdl = [];
+  const pfs = [[], []];     // deux hypothèses : fond = niveau haut (pièces plus sombres) ou bas (pièces plus claires) du voisinage
   for(let c = 0; c < 3; c++){
     const sm = new Float32Array(sw * sh);
     for(let y = 0; y < sh; y++) for(let x = 0; x < sw; x++){
@@ -537,15 +557,20 @@ function segment(){
       }
       sm[y * sw + x] = sum / cnt;
     }
-    const pf = new Float32Array(sw * sh), buf = new Float32Array(win * win);
+    sms.push(sm);
+    const hi = new Float32Array(sw * sh), lo = new Float32Array(sw * sh), buf = new Float32Array(win * win);
     for(let y = 0; y < sh; y++) for(let x = 0; x < sw; x++){
       let m = 0;
       for(let yy = Math.max(0, y - hw); yy <= Math.min(sh - 1, y + hw); yy++) for(let xx = Math.max(0, x - hw); xx <= Math.min(sw - 1, x + hw); xx++) buf[m++] = sm[yy * sw + xx];
       const part = buf.subarray(0, m).sort();
-      pf[y * sw + x] = part[Math.floor((m - 1) * .75)];
+      hi[y * sw + x] = part[Math.floor((m - 1) * .75)]; lo[y * sw + x] = part[Math.floor((m - 1) * .25)];
     }
-    mdl.push(boxBlur(boxBlur(pf, sw, sh, 1), sw, sh, 1));
+    pfs[0].push(hi); pfs[1].push(lo);
   }
+  // on retient l'hypothèse qui laisse le moins de surface "différente du fond"
+  const flagged = h2 => { let c = 0; for(let i = 0; i < sw * sh; i++){ const a0 = sms[0][i] - h2[0][i], a1 = sms[1][i] - h2[1][i], a2 = sms[2][i] - h2[2][i]; if(a0 * a0 + a1 * a1 + a2 * a2 > 26 * 26) c++; } return c; };
+  const use = flagged(pfs[1]) < flagged(pfs[0]) ? pfs[1] : pfs[0];
+  for(let c = 0; c < 3; c++) mdl.push(boxBlur(boxBlur(use[c], sw, sh, 1), sw, sh, 1));
   const bgAt = (x, y, c) => {   // interpolation bilinéaire du modèle
     const fx = Math.min(sw - 1, Math.max(0, (x + .5) / kk - .5)), fy = Math.min(sh - 1, Math.max(0, (y + .5) / kk - .5));
     const x0 = Math.floor(fx), y0 = Math.floor(fy), x1 = Math.min(sw - 1, x0 + 1), y1 = Math.min(sh - 1, y0 + 1), tx = fx - x0, ty = fy - y0, m = mdl[c];
@@ -553,12 +578,17 @@ function segment(){
   };
   const bg = [0, 1, 2].map(c => bgAt(w / 2, h / 2, c));
   const dist = new Float32Array(n), hist = new Float64Array(256);
+  // distance au fond : on sépare la composante "plus sombre/plus clair avec la même teinte" (ombre portée, qui compte peu)
+  // de l'écart de teinte (qui compte pleinement). Un objet très sombre (k < 0,55) reste détecté.
   for(let y = 0; y < h; y++) for(let x = 0; x < w; x++){
-    const i = y * w + x, d0 = ch[0][i] - bgAt(x, y, 0), d1 = ch[1][i] - bgAt(x, y, 1), d2 = ch[2][i] - bgAt(x, y, 2);
-    dist[i] = Math.sqrt(d0 * d0 + d1 * d1 + d2 * d2);
+    const i = y * w + x, b0 = bgAt(x, y, 0), b1 = bgAt(x, y, 1), b2 = bgAt(x, y, 2), p0 = ch[0][i], p1 = ch[1][i], p2 = ch[2][i];
+    const bn2 = b0 * b0 + b1 * b1 + b2 * b2 + 1e-6, bn = Math.sqrt(bn2), k = (p0 * b0 + p1 * b1 + p2 * b2) / bn2;
+    const perp2 = Math.max(0, p0 * p0 + p1 * p1 + p2 * p2 - k * k * bn2);
+    const def = Math.max(0, .55 - k) * bn, exc = Math.max(0, k - 1.15) * bn, par = (k > 1 ? .35 : .15) * (k - 1) * bn;
+    dist[i] = Math.sqrt(perp2 + def * def + exc * exc + par * par);
   }
   const medD = (() => { const t = new Float32Array(Math.ceil(n / 7)); for(let i = 0, q = 0; i < n; i += 7) t[q++] = dist[i]; return t.sort()[t.length >> 1]; })();
-  const thr = Math.max(18, Math.min(34, 5 * medD + 6)) * S.mul;
+  const thr = Math.max(14, Math.min(30, 5 * medD + 6)) * S.mul;
   let mask = new Uint8Array(n);
   for(let i = 0; i < n; i++) mask[i] = dist[i] > thr ? 1 : 0;
   mask = fillHoles(closeMask(mask, w, h, Math.max(2, Math.round(w / 300))), w, h);
@@ -595,13 +625,14 @@ function segment(){
   S.pz = {w, h, lab, bg, f:S.photo.width / w, comps:used};
   S.pieces = used.map((c, k) => ({
     num:k + 1, color:COLORS[k % COLORS.length], comp:c, warn:c.warn || null, scaleA:scaleA || c.area,
-    rep:null, ranked:[], median:1, pick:-1, rejected:new Set(), done:false
+    alpha:0, alphaConf:0, rep:null, ranked:[], median:1, pick:-1, rejected:new Set(), done:false
   }));
+  for(const p of S.pieces) if(!p.warn){ const r = pieceAlpha(p.comp); p.alpha = r.alpha; p.alphaConf = r.conf; }
   return true;
 }
 
 // représentation d'une pièce à l'échelle d'une case de taille cw (px) : points échantillonnés + statistiques
-function pieceRep(crop, X0, Y0, Afull, cxF, cyF, cw, comp, br){
+function pieceRep(crop, X0, Y0, Afull, cxF, cyF, cw, comp, br, maxPts){
   const z = S.pz, f = z.f;
   const k = cw / Math.sqrt(Afull);
   const bw = Math.max(8, Math.ceil(crop.width * k)), bh = Math.max(8, Math.ceil(crop.height * k));
@@ -629,7 +660,7 @@ function pieceRep(crop, X0, Y0, Afull, cxF, cyF, cw, comp, br){
   for(let i = 0; i < er.length; i++) cnt += er[i];
   if(cnt < 30){ er = erode(mw, bw, bh, Math.max(1, r >> 1)); for(let i = 0; i < er.length; i++) if(bad[i]) er[i] = 0; cnt = 0; for(let i = 0; i < er.length; i++) cnt += er[i]; }
   if(cnt < 15) return null;
-  const st = Math.max(1, Math.round(Math.sqrt(cnt / 600)));
+  const st = Math.max(1, Math.round(Math.sqrt(cnt / (maxPts || 600))));
   const qx = [], qy = [], ql = [], qu = [], qv = [], qgx = [], qgy = [];
   for(let y = 0; y < bh; y += st) for(let x = 0; x < bw; x += st){
     const i = y * bw + x;
@@ -685,8 +716,11 @@ function buildPieces(){
     const Afull = p.scaleA * f * f, cxF = c.cxs * f, cyF = c.cys * f;
     const rc = pieceRep(crop, X0, Y0, Afull, cxF, cyF, S.work.c.cw, c, CB1);
     const rf = pieceRep(crop, X0, Y0, Afull, cxF, cyF, S.work.f.cw, c, CB2);
-    if(!rc || !rf){ p.warn = 'trop petite ou mal détourée'; continue; }
-    p.rep = {c:rc, f:rf};
+    const cwP = Math.sqrt((S.ref.width / S.cols) * (S.ref.height / S.rows));
+    const rp = pieceRep(crop, X0, Y0, Afull, cxF, cyF, cwP, c, CB3, PIX_PTS);
+    if(!rc || !rf || !rp){ p.warn = 'trop petite ou mal détourée'; continue; }
+    p.rep = {c:rc, f:rf, p:rp};
+    p.res = Math.sqrt(Afull) / cwP;     // pixels de la photo par pixel de l'image du puzzle (>1 : assez de détail)
     // vignette (découpe de la pièce, fond transparent)
     const cs = 120, kc = cs / Math.sqrt(Afull);
     const cw_ = Math.max(8, Math.ceil(crop.width * kc)), ch_ = Math.max(8, Math.ceil(crop.height * kc));
@@ -781,18 +815,22 @@ function makeScorer(lv, pr, cl){
   };
 }
 
-// recherche locale (position, angle, échelle) de plus en plus fine
-function refine(sc, x, y, a, m, cwF){
+// recherche locale (position, angle, échelle) de plus en plus fine ; o : pas, bornes autour du point de départ
+function refine(sc, x, y, a, m, cwF, o){
+  o = o || {};
   let best = sc(x, y, Math.cos(a), Math.sin(a), m);
   if(!isFinite(best)) return {s:best, x, y, a, m};
-  const st = [.1 * cwF, 8 * Math.PI / 180, .05];
+  const st = o.st ? o.st.slice() : [.1 * cwF, 8 * Math.PI / 180, .05];
+  const x0 = x, y0 = y, a0 = a, am = o.amax === undefined ? Infinity : o.amax, pm = o.pmax === undefined ? Infinity : o.pmax;
+  const mlo = o.mlo || .9, mhi = o.mhi || 1.12;
   for(let lvl = 0; lvl < 4; lvl++){
     for(let guard = 0; guard < 8; guard++){
       let imp = false;
       for(let p = 0; p < 4; p++) for(const sg of [1, -1]){
         let nx = x, ny = y, na = a, nm = m;
         if(p === 0) nx += sg * st[0]; else if(p === 1) ny += sg * st[0]; else if(p === 2) na += sg * st[1];
-        else nm = Math.min(1.12, Math.max(.9, nm + sg * st[2]));
+        else nm = Math.min(mhi, Math.max(mlo, nm + sg * st[2]));
+        if(Math.abs(na - a0) > am || Math.abs(nx - x0) > pm || Math.abs(ny - y0) > pm) continue;
         const s = sc(nx, ny, Math.cos(na), Math.sin(na), nm);
         if(s < best - 1e-6){ best = s; x = nx; y = ny; a = na; m = nm; imp = true; }
       }
@@ -807,17 +845,28 @@ const tick = () => new Promise(r => setTimeout(r, 0));
 
 // recherche des emplacements d'une pièce : p.ranked (meilleurs d'abord), p.median
 async function runSearch(p, id, prog){
-  const wk = S.work;
+  const wk = S.work, D = Math.PI / 180;
   const lc = wk.c, lf = wk.f, cl = cal();
   const scC = makeScorer(lc, p.rep.c, cl), scF = makeScorer(lf, p.rep.f, cl);
   const cols = S.cols, rows = S.rows, nc = cols * rows;
   const cwx = lc.W / cols, chy = lc.H / rows;
   const placed = new Set(S.placed);
 
-  const allowed = new Array(nc);
-  const rotStep = 2 * Math.PI / NR, cs = [], sn = [];
-  for(let r = 0; r < NR; r++){ cs.push(Math.cos(r * rotStep)); sn.push(Math.sin(r * rotStep)); }
+  // orientations : une pièce posée dans le puzzle est toujours droite (alignée sur la grille).
+  // Sur la photo elle est tournée de -alpha ; il reste donc 4 orientations possibles (+ 90° chacune) et quelques degrés de tolérance.
+  const constrained = p.alphaConf >= .15;
+  const angs = [], grp = [], base = [];
+  if(constrained){
+    for(let k = 0; k < 4; k++){
+      base.push(-p.alpha + k * Math.PI / 2);
+      for(const o of OFFS){ angs.push(-p.alpha + k * Math.PI / 2 + o * D); grp.push(k); }
+    }
+  } else {
+    for(let r = 0; r < NR_FREE; r++){ angs.push(r * 2 * Math.PI / NR_FREE); grp.push(r); }
+  }
+  const NR = angs.length, cs = angs.map(Math.cos), sn = angs.map(Math.sin);
   const allRots = []; for(let r = 0; r < NR; r++) allRots.push(r);
+  const allowed = new Array(nc);
   for(let ci = 0; ci < nc; ci++) allowed[ci] = placed.has((ci % cols) + ',' + ((ci / cols) | 0)) ? null : allRots;
 
   // passe grossière : toutes positions × orientations
@@ -835,7 +884,7 @@ async function runSearch(p, id, prog){
       }
     }
     if(performance.now() - last > 60){
-      prog(.6 * y / lc.H);
+      prog(.45 * y / lc.H);
       await tick(); last = performance.now();
       if(id !== S.runId) return false;
     }
@@ -853,15 +902,23 @@ async function runSearch(p, id, prog){
   for(let t = 0; t < K; t++){
     const ci = order[t];
     const starts = [];
-    const rs = allRots.filter(r => isFinite(scoreR[ci * NR + r])).sort((a, b) => scoreR[ci * NR + a] - scoreR[ci * NR + b]);
-    const picked = [];
-    for(const r of rs){
-      if(picked.length >= 6) break;
-      if(picked.every(q => Math.min((q - r + NR) % NR, (r - q + NR) % NR) >= 2)) picked.push(r);
+    if(constrained){
+      for(let k = 0; k < 4; k++){
+        let bi = -1;
+        for(let r = 0; r < NR; r++) if(grp[r] === k && isFinite(scoreR[ci * NR + r]) && (bi < 0 || scoreR[ci * NR + r] < scoreR[ci * NR + bi])) bi = r;
+        if(bi >= 0) starts.push({x:pxR[ci * NR + bi] * ratio, y:pyR[ci * NR + bi] * ratio, a:angs[bi], b:base[k]});
+      }
+    } else {
+      const rs = allRots.filter(r => isFinite(scoreR[ci * NR + r])).sort((a, b) => scoreR[ci * NR + a] - scoreR[ci * NR + b]);
+      const picked = [];
+      for(const r of rs){
+        if(picked.length >= 6) break;
+        if(picked.every(q => Math.min((q - r + NR) % NR, (r - q + NR) % NR) >= 2)) picked.push(r);
+      }
+      for(const r of picked) starts.push({x:pxR[ci * NR + r] * ratio, y:pyR[ci * NR + r] * ratio, a:angs[r]});
     }
-    for(const r of picked) starts.push({x:pxR[ci * NR + r] * ratio, y:pyR[ci * NR + r] * ratio, a:r * rotStep});
     for(const s0 of starts){
-      const res = refine(scF, s0.x, s0.y, s0.a, 1, lf.cw);
+      const res = refine(scF, s0.x, s0.y, s0.a, 1, lf.cw, constrained ? {a0:s0.b, amax:11 * D} : null);
       if(!isFinite(res.s)) continue;
       const col = Math.min(cols - 1, Math.max(0, Math.floor(res.x / cwf))), row = Math.min(rows - 1, Math.max(0, Math.floor(res.y / chf)));
       const ci2 = row * cols + col;
@@ -870,19 +927,47 @@ async function runSearch(p, id, prog){
       if(!prev || res.s < prev.s) fine.set(ci2, res);
     }
     if(performance.now() - last > 60){
-      prog(.6 + .4 * t / K);
+      prog(.45 + .35 * t / K);
       await tick(); last = performance.now();
       if(id !== S.runId) return false;
     }
   }
   if(id !== S.runId) return false;
 
-  const refined = [...fine.entries()].map(([ci, r]) => ({i:ci, col:ci % cols, row:(ci / cols) | 0, score:r.s, ang:r.a, m:r.m, x:r.x, y:r.y}));
-  refined.sort((a, b) => a.score - b.score);
-  const inRef = new Set(refined.map(r => r.i));
-  const rest = order.filter(ci => !inRef.has(ci)).map(ci => ({i:ci, col:ci % cols, row:(ci / cols) | 0, score:cellBest[ci] + 5, ang:0, m:1}));
-  p.median = refined.length ? refined[refined.length >> 1].score : 1;
-  p.ranked = refined.concat(rest);
+  // comparaison à la résolution de l'image d'origine : les meilleures candidates sont reprises presque pixel à pixel
+  const fineList = [...fine.entries()].sort((a, b) => a[1].s - b[1].s);
+  if(!wk.p) wk.p = buildLevel(1e9, CB3);
+  const lp = wk.p, scP = makeScorer(lp, p.rep.p, cl), rP = lp.W / lf.W, cwp = lp.W / cols, chp = lp.H / rows;
+  const pix = new Map(), tops = fineList.slice(0, NTOP3);
+  for(let t = 0; t < tops.length; t++){
+    const r0 = tops[t][1];
+    const o = {st:[.05 * lp.cw, 2 * D, .03], a0:r0.a, amax:4 * D, pmax:.25 * lp.cw, mlo:Math.max(.9, r0.m - .08), mhi:Math.min(1.12, r0.m + .08)};
+    const res = refine(scP, r0.x * rP, r0.y * rP, r0.a, r0.m, lp.cw, o);
+    if(!isFinite(res.s)) continue;
+    const col = Math.min(cols - 1, Math.max(0, Math.floor(res.x / cwp))), row = Math.min(rows - 1, Math.max(0, Math.floor(res.y / chp)));
+    const ci2 = row * cols + col;
+    if(!allowed[ci2]) continue;
+    const prev = pix.get(ci2);
+    if(!prev || res.s < prev.s) pix.set(ci2, {s:res.s, x:res.x / rP, y:res.y / rP, a:res.a, m:res.m, f:r0.s});
+    prog(.8 + .2 * (t + 1) / tops.length);
+    await tick();
+    if(id !== S.runId) return false;
+  }
+  if(id !== S.runId) return false;
+
+  const mk = (ci, r, off) => ({i:ci, col:ci % cols, row:(ci / cols) | 0, score:r.s + off, ang:r.a, m:r.m, x:r.x, y:r.y});
+  const pixList = [...pix.entries()].map(([ci, r]) => mk(ci, r, 0)).sort((a, b) => a.score - b.score);
+  const others = fineList.filter(([ci]) => !pix.has(ci)).map(([ci, r]) => mk(ci, r, 3));
+  const fm = fineList.length ? fineList[fineList.length >> 1][1].s : 1;
+  let kappa = 1;
+  if(pix.size){
+    const a = [...pix.values()].map(v => v.s).sort((x, y) => x - y), b = [...pix.values()].map(v => v.f).sort((x, y) => x - y);
+    kappa = a[a.length >> 1] / Math.max(.05, b[b.length >> 1]);
+  }
+  const inRef = new Set(fineList.map(([ci]) => ci));
+  const rest = order.filter(ci => !inRef.has(ci)).map(ci => ({i:ci, col:ci % cols, row:(ci / cols) | 0, score:cellBest[ci] + 8, ang:0, m:1}));
+  p.median = fm * kappa;
+  p.ranked = pixList.concat(others, rest);
   p.pick = -1; p.rejected = new Set();
   return true;
 }
@@ -938,7 +1023,8 @@ function drawRefThumb(cv, col, row){
 function drawPieceThumb(cv, p, ang, m){
   const T = cv.width, ctx = cv.getContext('2d');
   ctx.fillStyle = '#d9d8d2'; ctx.fillRect(0, 0, T, T);
-  ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.strokeRect(T / 3, T / 3, T / 3, T / 3);
+  const ar = Math.sqrt((S.ref.width / S.cols) / (S.ref.height / S.rows)), fw = T / 3 * ar, fh = T / 3 / ar;   // case rectangulaire
+  ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.strokeRect((T - fw) / 2, (T - fh) / 2, fw, fh);
   ctx.save();
   ctx.translate(T / 2, T / 2); ctx.rotate(ang);
   const sc = (T / 3) / p.cutSize * m; ctx.scale(sc, sc);
@@ -1051,6 +1137,8 @@ async function process(){
       if(!ok){ setProgress(null); break; }
       setStatus('Recherche…'); setProgress(0);
       await searchAll();
+      const lowRes = S.pieces.filter(p => p.rep && p.res < .8).length;
+      if(lowRes && !again) setStatus(lowRes + ' pièce' + (lowRes > 1 ? 's' : '') + ' ont moins de détails que l\'image du puzzle : rapproche l\'appareil (ou photographie moins de pièces à la fois) pour une comparaison plus précise.');
     } while(again);
   } catch(e){
     setStatus('Erreur : ' + e.message, true); setProgress(null);
